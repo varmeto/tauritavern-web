@@ -2,7 +2,7 @@ import { callGenericPopup, POPUP_RESULT, POPUP_TYPE } from '../../../popup.js';
 import { isMobile } from '../../../RossAscends-mods.js';
 import { t, translate } from '../../../i18n.js';
 import { scanQrCodeWithBackCancellation } from '../../../../tauri/main/services/barcode-scanner/barcode-scanner-service.js';
-import { writeClipboardText } from '../../../../tauri-bridge.js';
+import { isWebRuntime, writeClipboardText } from '../../../../tauri-bridge.js';
 import {
     LAN_SYNC_DEVICES_CHANGED_EVENT,
     SYNC_AUTOMATION_CHANGED_EVENT,
@@ -567,6 +567,18 @@ function canScanPairUri() {
 }
 
 export async function openSyncPopup() {
+    if (isWebRuntime()) {
+        const message = document.createElement('p');
+        message.textContent = translate('Device sync is not available in the Docker web version. Use the desktop app to sync devices.');
+        await callGenericPopup(message, POPUP_TYPE.TEXT, '', {
+            okButton: translate('Close'),
+            allowVerticalScrolling: true,
+            wide: false,
+            large: false,
+        });
+        return;
+    }
+
     ensureSyncStyle();
 
     const bundle = await importSyncBundle();

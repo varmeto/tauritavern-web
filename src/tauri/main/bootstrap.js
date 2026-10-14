@@ -1,4 +1,4 @@
-import { invoke, isTauri as isTauriRuntime } from '../../tauri-bridge.js';
+import { invoke, isTauri as isTauriRuntime, isWebRuntime } from '../../tauri-bridge.js';
 import { eventSource, event_types } from '../../scripts/events.js';
 import { createTauriMainContext } from './context.js';
 import { createDownloadBridge } from './download-bridge.js';
@@ -262,7 +262,7 @@ function installSameOriginWindowPatches(interceptors, downloadBridge, { iframeCo
 }
 
 export function bootstrapTauriMain() {
-    if (!isTauriRuntime() || bootstrapped) {
+    if ((!isTauriRuntime() && !isWebRuntime()) || bootstrapped) {
         return;
     }
     bootstrapped = true;
@@ -272,17 +272,21 @@ export function bootstrapTauriMain() {
     if (perfEnabled) {
         safePerfMark('tt:tauri:bootstrap:start');
     }
-    const isMobile = isMobileUserAgent(); if (isMobile) installTauriMobileCompat();
+    const isNativeTauri = isTauriRuntime();
+    const isMobile = isMobileUserAgent();
+    if (isNativeTauri && isMobile) installTauriMobileCompat();
 
     installFrontendLogCapture();
     installDialogPolyfillCoverage();
-    if (!isMobile) {
+    if (isNativeTauri && !isMobile) {
         installDesktopFullscreenShortcut();
         registerLifecycleFlushHandler('desktop-fullscreen', leaveDesktopFullscreenForShutdown);
     }
 
-    installBackNavigationBridge();
-    installNativeShareBridge();
+    if (isNativeTauri) {
+        installBackNavigationBridge();
+        installNativeShareBridge();
+    }
 
     const context = createTauriMainContext({ invoke });
     installHostAbi(context); installLayoutApi(context); installChatApi(context); installChatSurfaceApi(); installCharacterCardsApi(context); installAgentApi(context); installLlmConnectionsApi(context); installMcpApi(context); installSkillApi(context); installDevApi(context); installExtensionStoreApi(context); installDbApi(context); installWorldInfoApi();

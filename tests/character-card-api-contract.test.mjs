@@ -187,3 +187,39 @@ test('api.characterCards leaves Android on the WebView file input path', async (
         assert.deepEqual(calls, []);
     });
 });
+
+test('api.characterCards uses the browser file picker in web host mode', async () => {
+    const previousDocument = globalThis.document;
+    const { calls, characterCards } = await installHarness();
+    globalThis.window.__TAURITAVERN_WEB__ = true;
+    const file = new File(['{"name":"Browser"}'], 'Browser.json', { type: 'application/json' });
+    let input;
+    globalThis.document = {
+        createElement(tagName) {
+            assert.equal(tagName, 'input');
+            input = {
+                files: [file],
+                addEventListener(name, handler) {
+                    this.handlers ??= {};
+                    this.handlers[name] = handler;
+                },
+                click() {
+                    this.handlers.change();
+                },
+            };
+            return input;
+        },
+    };
+
+    try {
+        const files = await characterCards.pickFiles({ multiple: true });
+        assert.equal(characterCards.isNativePickerAvailable(), true);
+        assert.deepEqual(files, [file]);
+        assert.equal(input.accept, '.json,.png');
+        assert.equal(input.multiple, true);
+        assert.deepEqual(calls, []);
+    } finally {
+        if (previousDocument === undefined) delete globalThis.document;
+        else globalThis.document = previousDocument;
+    }
+});

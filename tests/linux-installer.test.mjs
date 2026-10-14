@@ -7,6 +7,9 @@ import test from 'node:test';
 
 const installerPath = resolve('scripts/install-linux.sh');
 const installerSource = readFileSync(installerPath, 'utf8');
+const posixShellTestOptions = {
+    skip: commandExists('sh') ? false : 'requires POSIX sh',
+};
 
 function commandExists(command) {
     const result = spawnSync(command, ['-c', 'exit 0'], { stdio: 'ignore' });
@@ -83,7 +86,7 @@ test('Linux installer is syntactically valid in available common shells', {
     }
 });
 
-test('Linux installer supports piped execution through common shells', () => {
+test('Linux installer supports piped execution through common shells', posixShellTestOptions, () => {
     const release = osReleaseFile(
         'ID=debian\nVERSION_ID="12"\nPRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\n',
     );
@@ -110,7 +113,7 @@ test('Linux installer supports piped execution through common shells', () => {
     }
 });
 
-test('Linux installer detects every documented package distribution', () => {
+test('Linux installer detects every documented package distribution', posixShellTestOptions, () => {
     const cases = [
         {
             name: 'Debian GNU/Linux 12 (bookworm)',
@@ -151,7 +154,7 @@ test('Linux installer detects every documented package distribution', () => {
     }
 });
 
-test('Linux installer rejects versions outside the documented support range', () => {
+test('Linux installer rejects versions outside the documented support range', posixShellTestOptions, () => {
     const unsupportedCases = [
         {
             release: 'ID=debian\nVERSION_ID="11"\nPRETTY_NAME="Debian GNU/Linux 11"\n',
@@ -183,7 +186,7 @@ test('Linux installer rejects versions outside the documented support range', ()
     }
 });
 
-test('Linux installer automatically selects the flake on NixOS', () => {
+test('Linux installer automatically selects the flake on NixOS', posixShellTestOptions, () => {
     const result = runDryRun({
         osRelease: 'ID=nixos\nVERSION_ID="26.05"\nPRETTY_NAME="NixOS 26.05"\n',
         architecture: 'x86_64',
@@ -196,7 +199,7 @@ test('Linux installer automatically selects the flake on NixOS', () => {
     assert.match(result.output, /nix-cache\.tauritavern\.com/);
 });
 
-test('Linux installer can explicitly select Nix on another distribution', () => {
+test('Linux installer can explicitly select Nix on another distribution', posixShellTestOptions, () => {
     const result = runDryRun({
         osRelease: 'ID=arch\nPRETTY_NAME="Arch Linux"\n',
         architecture: 'aarch64',
@@ -208,7 +211,7 @@ test('Linux installer can explicitly select Nix on another distribution', () => 
     assert.match(result.output, /Install method\s+nix/);
 });
 
-test('Linux installer maps Canary to every supported package system', () => {
+test('Linux installer maps Canary to every supported package system', posixShellTestOptions, () => {
     const cases = [
         {
             release: 'ID=debian\nVERSION_ID="12"\nPRETTY_NAME="Debian 12"\n',
@@ -245,7 +248,7 @@ test('Linux installer maps Canary to every supported package system', () => {
     }
 });
 
-test('explicit Nix installation does not require os-release', () => {
+test('explicit Nix installation does not require os-release', posixShellTestOptions, () => {
     const result = runDryRun({
         osReleasePath: '/path/that/does/not/exist',
         architecture: 'x86_64',
@@ -257,7 +260,7 @@ test('explicit Nix installation does not require os-release', () => {
     assert.match(result.output, /Install method\s+nix/);
 });
 
-test('Linux installer rejects a native package request on NixOS', () => {
+test('Linux installer rejects a native package request on NixOS', posixShellTestOptions, () => {
     const result = runDryRun({
         osRelease: 'ID=nixos\nVERSION_ID="26.05"\nPRETTY_NAME="NixOS 26.05"\n',
         architecture: 'x86_64',

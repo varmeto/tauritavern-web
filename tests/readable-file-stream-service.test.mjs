@@ -56,6 +56,33 @@ test('file stream caps requests and reads the exact remaining bytes without an E
     ]);
 });
 
+test('web file stream reads through the authenticated same-origin file route', async t => {
+    const originalLocation = globalThis.location;
+    globalThis.location = new URL('http://localhost:8080/');
+    t.after(() => {
+        if (originalLocation === undefined) delete globalThis.location;
+        else globalThis.location = originalLocation;
+    });
+    let request;
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+        request = { url: String(url), options };
+        return new Response(new ReadableStream({
+            start(controller) {
+                controller.enqueue(Uint8Array.of(0x7b, 0x7d));
+                controller.close();
+            },
+        }));
+    });
+    const service = createReadableFileStreamService({
+        invoke: async () => { throw new Error('web file reads must not use native IPC'); },
+        isWebRuntime: () => true,
+    });
+
+    assert.deepEqual(await readStreamBytes(service.createReadableFileStream('/data/default-user/chats/character 1/chat.jsonl')), Uint8Array.of(0x7b, 0x7d));
+    assert.equal(request.url, 'http://localhost:8080/__tt/file?path=%2Fdata%2Fdefault-user%2Fchats%2Fcharacter+1%2Fchat.jsonl');
+    assert.equal(request.options.credentials, 'same-origin');
+});
+
 test('file stream continues positive short reads without delivering padding', async () => {
     const chunks = [Uint8Array.of(1, 2), Uint8Array.of(3, 4, 5)];
     const { service, calls } = mockFileService({

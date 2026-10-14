@@ -1,0 +1,13 @@
+.git
+.github
+.cache
+.flatpak-builder
+.flatpak-build
+node_modules
+src-tauri/target
+target
+**/target
+web/app-server/target
+release
+coverage
+*.log

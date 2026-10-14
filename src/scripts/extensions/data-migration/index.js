@@ -3,7 +3,7 @@ import { t, translate } from '../../i18n.js';
 import { Popup } from '../../popup.js';
 import { isAndroidRuntime, isIosRuntime } from '../../util/mobile-runtime.js';
 import { getActiveIosPolicyActivationReport } from '../../tauritavern/ios-policy.js';
-import { openDialog } from '../../../tauri-bridge.js';
+import { isWebRuntime, openDialog } from '../../../tauri-bridge.js';
 import { flushLifecycleState } from '../../../tauri/main/services/lifecycle/lifecycle-flush-service.js';
 
 const MODULE_NAME = 'data-migration';
@@ -94,6 +94,26 @@ async function startImportJobFromDesktopPicker() {
             'Content-Type': 'application/json',
         },
         body: JSON.stringify({ archive_path: archivePath }),
+    });
+}
+
+function pickWebImportArchive() {
+    return new Promise((resolve) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.zip,.tar,.gz,.tgz';
+        input.addEventListener('change', () => resolve(input.files?.[0] ?? null), { once: true });
+        input.addEventListener('cancel', () => resolve(null), { once: true });
+        input.click();
+    });
+}
+
+async function startImportJobFromWebPicker(archive) {
+    const formData = new FormData();
+    formData.append('archive', archive, archive.name || 'data.archive');
+    return requestImportJob('/api/extensions/data-migration/import', {
+        method: 'POST',
+        body: formData,
     });
 }
 
@@ -305,6 +325,15 @@ async function onImportButtonClick() {
 
         if (isIosRuntime()) {
             await onIosImportButtonClick();
+            return;
+        }
+
+        if (isWebRuntime()) {
+            const archive = await pickWebImportArchive();
+            if (!archive) {
+                return;
+            }
+            await runConfirmedImport(() => startImportJobFromWebPicker(archive));
             return;
         }
 

@@ -1,4 +1,4 @@
-import { invoke } from '../../../tauri-bridge.js';
+import { invoke, isWebRuntime } from '../../../tauri-bridge.js';
 import { stripJsonl } from '../../../tauri/main/kernel/chat-utils.js';
 import {
     characterStemFromAvatarFileName,
@@ -9,7 +9,7 @@ import { commitChatMetadata, commitChatPayload } from './commit.js';
 import { jsonlStreamToPayload } from './jsonl.js';
 import { loadColdChatPayload } from './cold-swipes.js';
 
-const { createReadableFileStream } = createReadableFileStreamService({ invoke });
+const { createReadableFileStream } = createReadableFileStreamService({ invoke, isWebRuntime });
 
 export const CHAT_COMMIT_REASON = Object.freeze({
     MUTATION: 'mutation',

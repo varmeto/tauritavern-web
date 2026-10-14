@@ -58,7 +58,7 @@ test('backend readiness fails fast when Tauri invoke is unavailable', async () =
 
         await assert.rejects(
             waitForBackendReady(),
-            /Tauri invoke is unavailable for backend readiness/,
+            /Tauri invoke is unavailable/,
         );
     } finally {
         cleanupGlobals();

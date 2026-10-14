@@ -1,0 +1,37 @@
+services:
+  app:
+    image: tauritavern-web-app:2.3.0-v1-arm64
+    platform: linux/arm64
+    expose:
+      - "3093"
+    environment:
+      PORT: "3093"
+      TT_DATA_DIR: /data
+    volumes:
+      - tauritavern-data:/data
+    networks:
+      - tauritavern
+    restart: unless-stopped
+
+  gateway:
+    image: tauritavern-web-gateway:2.3.0-v1-arm64
+    platform: linux/arm64
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      TT_BACKEND_URL: http://app:3093
+      TT_WEB_PASSWORD: ${TT_WEB_PASSWORD:?Set TT_WEB_PASSWORD in .env}
+    ports:
+      - "${TT_WEB_PORT:-8081}:8080"
+    networks:
+      - tauritavern
+    restart: unless-stopped
+
+networks:
+  tauritavern:
+    driver: bridge
+
+volumes:
+  tauritavern-data:

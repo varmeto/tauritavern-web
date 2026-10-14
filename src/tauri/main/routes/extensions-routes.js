@@ -1,4 +1,5 @@
 import { isIosRuntime } from '../../../scripts/util/mobile-runtime.js';
+import { isWebRuntime } from '../../../tauri-bridge.js';
 
 function parseJobId(value) {
     const jobId = String(value || '').trim();
@@ -301,7 +302,7 @@ export function registerExtensionRoutes(router, context, { jsonResponse }) {
             return jsonResponse({ error: 'Missing job id' }, 400);
         }
 
-        const { error } = await loadCompletedExportJobStatus(jobId);
+        const { error, status } = await loadCompletedExportJobStatus(jobId);
         if (error) {
             return error;
         }
@@ -309,6 +310,25 @@ export function registerExtensionRoutes(router, context, { jsonResponse }) {
         const savedTarget = await context.safeInvoke('save_export_data_archive', {
             job_id: jobId,
         });
+
+        if (isWebRuntime()) {
+            const downloadUrl = new URL('/__tt/file', globalThis.location.href);
+            downloadUrl.searchParams.set('path', String(savedTarget || ''));
+            const response = await fetch(downloadUrl, { credentials: 'same-origin' });
+            if (!response.ok) {
+                await context.safeInvoke('cleanup_web_archive_download', { path: String(savedTarget || '') }).catch(() => {});
+                return jsonResponse({ error: `Unable to download archive (${response.status})` }, 502);
+            }
+            const blob = await response.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = objectUrl;
+            link.download = String(status?.result?.file_name || 'tauritavern-data.zip');
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+            await context.safeInvoke('cleanup_web_archive_download', { path: String(savedTarget || '') }).catch(() => {});
+            return jsonResponse({ ok: true, saved_target: link.download, browser_download: true });
+        }
 
         return jsonResponse({
             ok: true,

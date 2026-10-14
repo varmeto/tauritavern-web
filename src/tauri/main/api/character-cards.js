@@ -1,6 +1,7 @@
 // @ts-check
 
 import { isAndroidRuntime, isIosRuntime } from '../../../scripts/util/mobile-runtime.js';
+import { isWebRuntime } from '../../../tauri-bridge.js';
 
 const CHARACTER_CARD_EXTENSIONS = ['json', 'png'];
 const CHARACTER_CARD_EXTENSION_SET = new Set(CHARACTER_CARD_EXTENSIONS);
@@ -139,7 +140,22 @@ function createCharacterCardsApi({
         return Promise.all(selectedPaths.map(path => fileFromPath(path)));
     }
 
+    function pickBrowserFiles({ multiple = false } = {}) {
+        return new Promise((resolve) => {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = CHARACTER_CARD_EXTENSIONS.map((extension) => `.${extension}`).join(',');
+            input.multiple = Boolean(multiple);
+            input.addEventListener('change', () => resolve(input.files ? Array.from(input.files) : []), { once: true });
+            input.addEventListener('cancel', () => resolve(null), { once: true });
+            input.click();
+        });
+    }
+
     async function pickFiles(options = {}) {
+        if (isWebRuntime()) {
+            return pickBrowserFiles(options);
+        }
         if (!isNativePickerAvailable()) {
             return null;
         }

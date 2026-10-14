@@ -1,5 +1,7 @@
 // @ts-check
 
+import { isWebRuntime } from '../../../../tauri-bridge.js';
+
 /**
  * @typedef {import('../../context/types.js').MaterializedFileInfo} MaterializedFileInfo
  * @typedef {(command: import('../../context/types.js').TauriInvokeCommand, args?: any) => Promise<any>} SafeInvokeFn
@@ -229,6 +231,37 @@ export function createUploadService({ safeInvoke, invoke } = {}) {
             sourceName: file instanceof File ? file.name : '',
         });
         let filePath = '';
+
+        if (isWebRuntime()) {
+            const url = new URL('/__tt/uploads', globalThis.location.href);
+            url.searchParams.set('kind', kind);
+            url.searchParams.set('extension', extension);
+            const response = await fetch(url, {
+                method: 'POST',
+                credentials: 'same-origin',
+                body: file,
+            });
+            const result = await response.json().catch(() => null);
+            filePath = String(result?.file_path || '').trim();
+            if (!response.ok || !filePath) {
+                throw new Error(result?.error || `Upload failed (${response.status})`);
+            }
+            return {
+                filePath,
+                isTemporary: true,
+                cleanup: async () => {
+                    const cleanupUrl = new URL('/__tt/uploads', globalThis.location.href);
+                    cleanupUrl.searchParams.set('path', filePath);
+                    const cleanupResponse = await fetch(cleanupUrl, {
+                        method: 'DELETE',
+                        credentials: 'same-origin',
+                    });
+                    if (!cleanupResponse.ok && cleanupResponse.status !== 404) {
+                        throw new Error(`Upload cleanup failed (${cleanupResponse.status})`);
+                    }
+                },
+            };
+        }
 
         try {
             const begin = await invokeHostUploadCommand('stage_upload_begin', {

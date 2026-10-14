@@ -236,6 +236,45 @@ test('Desktop upload materialization keeps real file paths without staging copy'
     }
 });
 
+test('browser upload staging uses the authenticated host upload route and cleans up', async t => {
+    const previousWindow = globalThis.window;
+    const previousLocation = globalThis.location;
+    globalThis.window = { __TAURITAVERN_WEB__: true };
+    globalThis.location = new URL('http://localhost:8080/');
+    t.after(() => {
+        if (previousWindow === undefined) delete globalThis.window;
+        else globalThis.window = previousWindow;
+        if (previousLocation === undefined) delete globalThis.location;
+        else globalThis.location = previousLocation;
+    });
+    const requests = [];
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+        requests.push({ url: String(url), options });
+        if (options.method === 'POST') {
+            return new Response(JSON.stringify({ file_path: '/data/_tauritavern/web-uploads/abc.png' }), {
+                headers: { 'content-type': 'application/json' },
+            });
+        }
+        return new Response(null, { status: 204 });
+    });
+    const service = createUploadService();
+    const blob = new Blob(['avatar'], { type: 'image/png' });
+
+    const fileInfo = await service.materializeUploadFile(blob, {
+        kind: 'avatar',
+        preferredName: 'portrait.png',
+    });
+    assert.equal(fileInfo.filePath, '/data/_tauritavern/web-uploads/abc.png');
+    assert.equal(fileInfo.isTemporary, true);
+    assert.equal(requests[0].url, 'http://localhost:8080/__tt/uploads?kind=avatar&extension=png');
+    assert.equal(requests[0].options.credentials, 'same-origin');
+    assert.equal(requests[0].options.body, blob);
+
+    await fileInfo.cleanup();
+    assert.equal(requests[1].url, 'http://localhost:8080/__tt/uploads?path=%2Fdata%2F_tauritavern%2Fweb-uploads%2Fabc.png');
+    assert.equal(requests[1].options.method, 'DELETE');
+});
+
 
 test('Android data archive materialization rejects the generic Blob upload path', async () => {
     const restore = installAndroidRuntimeGlobals();

@@ -1,0 +1,39 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: web/app-server/Dockerfile
+    expose:
+      - "3093"
+    environment:
+      PORT: "3093"
+      TT_DATA_DIR: /data
+    volumes:
+      - tauritavern-data:/data
+    networks:
+      - tauritavern
+    restart: unless-stopped
+
+  gateway:
+    build:
+      context: .
+      dockerfile: web/gateway/Dockerfile
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      TT_BACKEND_URL: http://app:3093
+      TT_WEB_PASSWORD: ${TT_WEB_PASSWORD:?Set TT_WEB_PASSWORD to a password of at least 12 characters}
+    ports:
+      - "${TT_WEB_PORT:-8081}:8080"
+    networks:
+      - tauritavern
+    restart: unless-stopped
+
+networks:
+  tauritavern:
+    driver: bridge
+
+volumes:
+  tauritavern-data:

@@ -851,6 +851,7 @@ async function activateExtensions({ parallelism = 1, includeExtension = () => tr
             await Promise.all([addExtensionScript(name, manifest), addExtensionStyle(name, manifest)]);
             await callExtensionHook(name, 'activate');
             activeExtensions.add(name);
+            syncExtensionActivationStatus(name);
         } catch (err) {
             console.log('Could not activate extension', name, err);
             extensionLoadErrors.add(t`Extension "${displayName}" failed to load: ${err}`);
@@ -1268,6 +1269,35 @@ function getExtensionData(extension) {
     const extensionElement = generateExtensionElement(name, manifest, isActive, isDisabled, isExternal, checkboxClass);
 
     return { isExternal, extensionElement };
+}
+
+function syncExtensionActivationStatus(name) {
+    const externalId = name.replace('third-party', '');
+    const block = [...document.querySelectorAll('.extensions_info .extension_block')]
+        .find(element => element.dataset.name === externalId);
+    if (!block) {
+        return;
+    }
+
+    const isActive = activeExtensions.has(name);
+    const isDisabled = extension_settings.disabledExtensions.includes(name);
+    const toggle = block.querySelector('.extension_toggle input');
+    const status = block.querySelector('.extension_enabled, .extension_disabled, .extension_missing');
+    if (!toggle || !status) {
+        return;
+    }
+
+    toggle.checked = isActive;
+    toggle.disabled = !isActive && !isDisabled;
+    toggle.title = isActive || isDisabled ? t`Click to toggle` : t`Cannot enable extension`;
+    toggle.classList.remove('toggle_disable', 'toggle_enable', 'extension_missing', 'checkbox_disabled');
+    toggle.classList.add(isActive ? 'toggle_disable' : isDisabled ? 'toggle_enable' : 'extension_missing');
+    if (isDisabled) {
+        toggle.classList.add('checkbox_disabled');
+    }
+
+    status.classList.remove('extension_enabled', 'extension_disabled', 'extension_missing');
+    status.classList.add(isActive ? 'extension_enabled' : isDisabled ? 'extension_disabled' : 'extension_missing');
 }
 
 

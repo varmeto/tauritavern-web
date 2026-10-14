@@ -5,6 +5,7 @@ import {
     getClientVersion as getBridgeClientVersion,
     getTauriTavernSettings,
     invoke,
+    isWebRuntime,
     openExternalUrl,
     updateTauriTavernSettings,
 } from '../../../tauri-bridge.js';
@@ -164,6 +165,23 @@ async function onExportDebugBundleClick() {
             if (shareResult?.completed === true) {
                 globalThis.toastr?.success?.(localize('ttv_version.export_success', 'Export completed.'));
             }
+            return;
+        }
+
+        if (isWebRuntime()) {
+            const downloadUrl = new URL('/__tt/file', window.location.href);
+            downloadUrl.searchParams.set('path', String(savedPath));
+            const response = await fetch(downloadUrl, { credentials: 'same-origin' });
+            if (!response.ok) {
+                throw new Error(`Unable to download diagnostic bundle (${response.status})`);
+            }
+            const objectUrl = URL.createObjectURL(await response.blob());
+            const link = document.createElement('a');
+            link.href = objectUrl;
+            link.download = String(savedPath).split(/[\\/]/).at(-1) || 'tauritavern-dev-bundle.zip';
+            link.click();
+            setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+            globalThis.toastr?.success?.(localize('ttv_version.export_success', 'Export completed.'));
             return;
         }
 

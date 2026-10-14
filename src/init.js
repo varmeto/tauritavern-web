@@ -1,6 +1,6 @@
 // Application bootstrap.
 
-window.__TAURI_RUNNING__ = true;
+window.__TAURI_RUNNING__ = window.__TAURITAVERN_WEB__ !== true;
 
 // In some WebKit builds, `location.href` may omit the trailing slash for origin-only
 // URLs (e.g. `tauri://localhost`). jQuery UI Tabs uses `anchor.href` vs

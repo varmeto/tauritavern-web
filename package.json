@@ -25,6 +25,8 @@
     "test:ui": "rstest --config rstest.config.mjs",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --workspace --no-default-features --tests",
     "web:build": "rspack build --config rspack.config.js --mode production",
+    "web:gateway:test": "node --test web/gateway/*.test.mjs",
+    "web:app:test": "node --test tests/web/app-server-smoke.test.mjs",
     "web:dev": "rspack build --config rspack.config.js --mode development --watch",
     "tauri:dev": "node scripts/tauri-app.mjs --prepare-frontend dev",
     "tauri:dev:pilot": "node scripts/tauri-app.mjs --prepare-frontend dev --features devtools-pilot --config src-tauri/crates/tauritavern/tauri.pilot.conf.json",

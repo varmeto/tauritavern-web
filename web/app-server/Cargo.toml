@@ -1,0 +1,38 @@
+[package]
+name = "tt-web-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+futures-util = "0.3"
+axum = { version = "0.8", default-features = false, features = ["http1", "http2", "json", "query", "tokio", "ws"] }
+http = "1"
+mime_guess = "2"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync"] }
+tt-adapter-http = { path = "../../src-tauri/crates/tt-adapter-http" }
+tt-adapter-storage-core = { path = "../../src-tauri/crates/tt-adapter-storage-core" }
+tt-adapter-storage-userdata = { path = "../../src-tauri/crates/tt-adapter-storage-userdata" }
+tt-domain = { path = "../../src-tauri/crates/tt-domain" }
+tt-adapter-media = { path = "../../src-tauri/crates/tt-adapter-media" }
+tt-adapter-provider-http = { path = "../../src-tauri/crates/tt-adapter-provider-http" }
+tt-adapter-archive = { path = "../../src-tauri/crates/tt-adapter-archive" }
+tt-adapter-extension = { path = "../../src-tauri/crates/tt-adapter-extension" }
+tt-adapter-mcp = { path = "../../src-tauri/crates/tt-adapter-mcp" }
+tt-adapter-quickjs = { path = "../../src-tauri/crates/tt-adapter-quickjs" }
+tt-adapter-tokenization = { path = "../../src-tauri/crates/tt-adapter-tokenization" }
+tt-adapter-vector = { path = "../../src-tauri/crates/tt-adapter-vector" }
+tt-adapter-triviumdb = { path = "../../src-tauri/crates/tt-adapter-triviumdb" }
+tt-application = { path = "../../src-tauri/crates/tt-application" }
+tt-contracts = { path = "../../src-tauri/crates/tt-contracts" }
+tt-ports = { path = "../../src-tauri/crates/tt-ports" }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+

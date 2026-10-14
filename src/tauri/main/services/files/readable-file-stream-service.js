@@ -17,9 +17,9 @@ function normalizeReadResponse(data) {
 }
 
 /**
- * @param {{ invoke: Function }} deps
+ * @param {{ invoke: Function, isWebRuntime?: () => boolean }} deps
  */
-export function createReadableFileStreamService({ invoke }) {
+export function createReadableFileStreamService({ invoke, isWebRuntime = () => false }) {
     if (typeof invoke !== 'function') {
         throw new Error('Tauri invoke API is unavailable');
     }
@@ -74,6 +74,38 @@ export function createReadableFileStreamService({ invoke }) {
 
     /** @param {string} filePath */
     function createReadableFileStream(filePath) {
+        if (isWebRuntime()) {
+            /** @type {Promise<ReadableStreamDefaultReader<Uint8Array>> | undefined} */
+            let readerPromise;
+            return new ReadableStream({
+                async pull(controller) {
+                    try {
+                        if (!readerPromise) {
+                            readerPromise = (async () => {
+                                const url = new URL('/__tt/file', globalThis.location.href);
+                                url.searchParams.set('path', filePath);
+                                const response = await fetch(url, { credentials: 'same-origin' });
+                                if (!response.ok || !response.body) {
+                                    throw new Error(`Unable to read chat file (${response.status})`);
+                                }
+                                return response.body.getReader();
+                            })();
+                        }
+                        const reader = await readerPromise;
+                        const { done, value } = await reader.read();
+                        if (done) controller.close();
+                        else controller.enqueue(value);
+                    } catch (error) {
+                        controller.error(error);
+                    }
+                },
+                async cancel() {
+                    const reader = await readerPromise;
+                    await reader?.cancel();
+                },
+            });
+        }
+
         /** @type {number | undefined} */
         let remaining;
         return createReadableResourceStream(
