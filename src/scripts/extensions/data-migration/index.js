@@ -1,6 +1,6 @@
 import { renderExtensionTemplateAsync } from '../../extensions.js';
 import { t, translate } from '../../i18n.js';
-import { Popup } from '../../popup.js';
+import { Popup, POPUP_TYPE, POPUP_RESULT } from '../../popup.js';
 import { isAndroidRuntime, isIosRuntime } from '../../util/mobile-runtime.js';
 import { getActiveIosPolicyActivationReport } from '../../tauritavern/ios-policy.js';
 import { isWebRuntime, openDialog } from '../../../tauri-bridge.js';
@@ -97,23 +97,60 @@ async function startImportJobFromDesktopPicker() {
     });
 }
 
-function pickWebImportArchive() {
-    return new Promise((resolve) => {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = '.zip,.tar,.gz,.tgz';
-        input.addEventListener('change', () => resolve(input.files?.[0] ?? null), { once: true });
-        input.addEventListener('cancel', () => resolve(null), { once: true });
-        input.click();
+async function pickNasImportArchive() {
+    const response = await fetch('/api/extensions/data-migration/nas-archives');
+    if (!response.ok) {
+        throw new Error(await readFailureMessage(response));
+    }
+
+    const archives = await response.json();
+    if (!Array.isArray(archives) || archives.length === 0) {
+        toastr.warning(t`No supported archive files found in the NAS import folder`);
+        return null;
+    }
+
+    const select = document.createElement('select');
+    select.className = 'text_pole';
+    for (const archive of archives) {
+        const option = document.createElement('option');
+        option.value = String(archive?.fileName || '');
+        const size = Number(archive?.sizeBytes || 0);
+        option.textContent = `${option.value} (${formatArchiveSize(size)})`;
+        select.append(option);
+    }
+    const content = document.createElement('div');
+    const label = document.createElement('label');
+    label.textContent = t`Select an archive already stored on the NAS`;
+    label.append(select);
+    content.append(label);
+
+    let selectedFileName = '';
+    const popup = new Popup(content, POPUP_TYPE.TEXT, '', {
+        okButton: t`Continue`,
+        cancelButton: t`Cancel`,
+        onClosing: () => {
+            selectedFileName = select.value;
+        },
     });
+    const result = await popup.show();
+    return result === POPUP_RESULT.AFFIRMATIVE ? selectedFileName : null;
 }
 
-async function startImportJobFromWebPicker(archive) {
-    const formData = new FormData();
-    formData.append('archive', archive, archive.name || 'data.archive');
-    return requestImportJob('/api/extensions/data-migration/import', {
+function formatArchiveSize(sizeBytes) {
+    const size = Math.max(0, Number(sizeBytes) || 0);
+    if (size < 1024 * 1024) {
+        return `${Math.ceil(size / 1024)} KB`;
+    }
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function startImportJobFromNasArchive(fileName) {
+    return requestImportJob('/api/extensions/data-migration/import/nas', {
         method: 'POST',
-        body: formData,
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ file_name: fileName }),
     });
 }
 
@@ -329,11 +366,11 @@ async function onImportButtonClick() {
         }
 
         if (isWebRuntime()) {
-            const archive = await pickWebImportArchive();
-            if (!archive) {
+            const fileName = await pickNasImportArchive();
+            if (!fileName) {
                 return;
             }
-            await runConfirmedImport(() => startImportJobFromWebPicker(archive));
+            await runConfirmedImport(() => startImportJobFromNasArchive(fileName));
             return;
         }
 
@@ -581,7 +618,7 @@ async function onIosImportButtonClick() {
 }
 
 async function runConfirmedImport(startJob) {
-    const prompt = t`Importing will merge into the current local data directory (same-path files will be overwritten). Continue?`;
+    const prompt = t`Importing will merge into the TauriTavern data directory (same-path files will be overwritten). Continue?`;
     const confirmed = isIosRuntime()
         ? await Popup.show.confirm(t`Confirm data import`, prompt)
         : window.confirm(prompt);

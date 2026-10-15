@@ -202,6 +202,25 @@ export function registerExtensionRoutes(router, context, { jsonResponse }) {
         return startImportJobFromFileInfo(fileInfo);
     });
 
+    router.get('/api/extensions/data-migration/nas-archives', async () => {
+        const archives = await context.safeInvoke('list_nas_data_archives');
+        return jsonResponse(Array.isArray(archives) ? archives : []);
+    });
+
+    router.post('/api/extensions/data-migration/import/nas', async ({ body }) => {
+        const fileName = String(body?.file_name || '').trim();
+        if (!fileName) {
+            return jsonResponse({ error: 'Missing NAS archive file name' }, 400);
+        }
+        const jobId = parseJobId(await context.safeInvoke('start_import_nas_data_archive', {
+            file_name: fileName,
+        }));
+        if (!jobId) {
+            return jsonResponse({ error: 'Import job id is missing' }, 500);
+        }
+        return jsonResponse({ ok: true, job_id: jobId });
+    });
+
     router.post('/api/extensions/data-migration/import/android', async ({ body }) => {
         const contentUri = String(body?.content_uri || '').trim();
         if (!contentUri) {

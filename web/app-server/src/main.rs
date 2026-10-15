@@ -191,6 +191,7 @@ use tt_ports::skill_script::SkillScriptEngine;
 struct WebHostState {
     host_resources: HostResourceService,
     data_root: PathBuf,
+    import_root: PathBuf,
     archive_root: PathBuf,
     channels: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
     chat_byte_readers: Mutex<HashMap<u32, WebChatByteReader>>,
@@ -521,6 +522,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_root = env::var("TT_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     tokio::fs::create_dir_all(&data_root).await?;
+    let import_root = env::var("TT_IMPORT_DIR").unwrap_or_else(|_| "/imports".to_string());
     let port = env::var("PORT")
         .ok()
         .map(|value| value.parse::<u16>())
@@ -883,6 +885,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::new(FilesystemHostResourceStore::from_data_root(&data_root)),
         ),
         data_root: PathBuf::from(&data_root),
+        import_root: PathBuf::from(&import_root),
         archive_root,
         channels: Mutex::new(HashMap::new()),
         chat_byte_readers: Mutex::new(HashMap::new()),
@@ -3705,6 +3708,19 @@ async fn invoke(
                 .map(|job_id| json!(job_id))
                 .map_err(|error| error.to_string())
         }
+        "list_nas_data_archives" => list_nas_data_archives(&state.import_root).await,
+        "start_import_nas_data_archive" => {
+            let file_name = string_arg(&request.args, "file_name", "fileName");
+            match resolve_nas_data_archive(&state.import_root, file_name).await {
+                Ok(archive_path) => state
+                    .services
+                    .data_archives
+                    .start_import(&archive_path, false)
+                    .map(|job_id| json!(job_id))
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            }
+        }
         "start_export_data_archive" => state
             .services
             .data_archives
@@ -5111,6 +5127,85 @@ fn string_arg<'a>(args: &'a Value, snake: &str, camel: &str) -> &'a str {
         .or_else(|| args.get(camel))
         .and_then(Value::as_str)
         .unwrap_or_default()
+}
+
+async fn list_nas_data_archives(import_root: &Path) -> Result<Value, String> {
+    let canonical_root = tokio::fs::canonicalize(import_root)
+        .await
+        .map_err(|error| format!("NAS import folder is unavailable: {error}"))?;
+    let mut entries = tokio::fs::read_dir(&canonical_root)
+        .await
+        .map_err(|error| format!("Unable to read NAS import folder: {error}"))?;
+    let mut archives = Vec::new();
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| format!("Unable to read NAS import folder: {error}"))?
+    {
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|error| format!("Unable to inspect NAS import file: {error}"))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let Some(file_name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+            continue;
+        };
+        if !is_data_archive_name(&file_name) {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .await
+            .map_err(|error| format!("Unable to inspect NAS import file: {error}"))?;
+        archives.push(json!({
+            "fileName": file_name,
+            "sizeBytes": metadata.len(),
+        }));
+    }
+
+    archives.sort_by(|left, right| {
+        left.get("fileName")
+            .and_then(Value::as_str)
+            .cmp(&right.get("fileName").and_then(Value::as_str))
+    });
+    Ok(json!(archives))
+}
+
+async fn resolve_nas_data_archive(import_root: &Path, file_name: &str) -> Result<PathBuf, String> {
+    let name = Path::new(file_name);
+    if file_name.trim().is_empty()
+        || name.file_name().and_then(|value| value.to_str()) != Some(file_name)
+        || !is_data_archive_name(file_name)
+    {
+        return Err("Invalid NAS archive file name".to_string());
+    }
+
+    let canonical_root = tokio::fs::canonicalize(import_root)
+        .await
+        .map_err(|error| format!("NAS import folder is unavailable: {error}"))?;
+    let candidate = tokio::fs::canonicalize(canonical_root.join(name))
+        .await
+        .map_err(|error| format!("NAS archive file was not found: {error}"))?;
+    if !candidate.starts_with(&canonical_root) {
+        return Err("NAS archive path is outside the import folder".to_string());
+    }
+    let metadata = tokio::fs::metadata(&candidate)
+        .await
+        .map_err(|error| format!("Unable to inspect NAS archive: {error}"))?;
+    if !metadata.is_file() {
+        return Err("NAS archive must be a regular file".to_string());
+    }
+    Ok(candidate)
+}
+
+fn is_data_archive_name(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    [".zip", ".tar", ".tar.gz", ".tgz", ".gz"]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
 }
 
 fn parse_dto<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<T, String> {
