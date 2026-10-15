@@ -130,6 +130,7 @@ async function pickNasImportArchive() {
         cancelButton: t`Cancel`,
         onClosing: () => {
             selectedFileName = select.value;
+            return true;
         },
     });
     const result = await popup.show();
@@ -273,6 +274,28 @@ function setStatusText(message) {
     $('#data_migration_status').text(String(message || ''));
 }
 
+function setProgress(value) {
+    const progress = $('#data_migration_progress');
+    if (!progress.length) {
+        return;
+    }
+
+    progress.prop('hidden', false);
+    if (Number.isFinite(value)) {
+        const clamped = Math.max(0, Math.min(100, value));
+        progress.attr('value', clamped);
+        progress.attr('aria-valuenow', clamped);
+    } else {
+        progress.removeAttr('value aria-valuenow');
+    }
+}
+
+function hideProgress() {
+    const progress = $('#data_migration_progress');
+    progress.prop('hidden', true);
+    progress.removeAttr('value aria-valuenow');
+}
+
 function refreshExportActions() {
     const actions = $('#data_migration_export_actions');
     if (!actions.length) {
@@ -325,6 +348,7 @@ function stopJobTracking() {
     jobState.jobId = '';
     jobState.starting = false;
     jobState.cancelRequested = false;
+    hideProgress();
     refreshControls();
 }
 
@@ -410,6 +434,8 @@ function updateStatusFromJob(status) {
     const stage = String(status?.stage || '').trim();
     const message = String(status?.message || '').trim();
     const progress = Number(status?.progress_percent);
+
+    setProgress(Number.isFinite(progress) ? progress : null);
 
     const parts = [];
     if (stage) {
@@ -498,10 +524,9 @@ async function runMigrationJob(kind, startJob) {
 
     try {
         markJobStarting();
+        setProgress(null);
+        setStatusText(kind === 'import' ? t`Preparing import...` : t`Preparing export...`);
         await flushLifecycleState(`data-archive:${kind}`);
-        if (kind === 'import') {
-            setStatusText(t`Preparing import...`);
-        }
         const jobId = await startJob();
         if (!jobId) {
             if (kind === 'import') {
@@ -619,8 +644,8 @@ async function onIosImportButtonClick() {
 
 async function runConfirmedImport(startJob) {
     const prompt = t`Importing will merge into the TauriTavern data directory (same-path files will be overwritten). Continue?`;
-    const confirmed = isIosRuntime()
-        ? await Popup.show.confirm(t`Confirm data import`, prompt)
+    const confirmed = isIosRuntime() || isWebRuntime()
+        ? await Popup.show.confirm(t`Confirm data import`, prompt) === POPUP_RESULT.AFFIRMATIVE
         : window.confirm(prompt);
     if (!confirmed) {
         return;
