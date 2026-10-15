@@ -8,21 +8,23 @@
  *   streamId: string;
  *   onEvent: (event: unknown) => void;
  *   isClosed: () => boolean;
+ *   readCommand?: import('../../kernel/invokes/tauri-commands.js').TauriInvokeCommand;
+ *   readArgs?: (streamId: string, afterSeq: number) => object;
  * }} deps
  * @returns {Promise<'done' | 'cancelled' | 'closed'>}
  */
-export async function consumeChatCompletionStream({ safeInvoke, streamId, onEvent, isClosed }) {
+export async function consumeChatCompletionStream({ safeInvoke, streamId, onEvent, isClosed, readCommand = 'read_chat_completion_stream', readArgs = (id, seq) => ({ streamId: id, afterSeq: seq }) }) {
     let afterSeq = 0;
 
     while (!isClosed()) {
         let result;
         try {
-            result = await safeInvoke('read_chat_completion_stream', { streamId, afterSeq });
+            result = await safeInvoke(readCommand, readArgs(streamId, afterSeq));
         } catch {
             if (isClosed()) {
                 return 'closed';
             }
-            result = await safeInvoke('read_chat_completion_stream', { streamId, afterSeq });
+            result = await safeInvoke(readCommand, readArgs(streamId, afterSeq));
         }
         const events = Array.isArray(result?.events) ? result.events : [];
 
@@ -46,6 +48,9 @@ export async function consumeChatCompletionStream({ safeInvoke, streamId, onEven
             }
 
             throw new Error(`Chat completion stream ended without a terminal event (${status || 'unknown'})`);
+        }
+        if (events.length === 0 && status === 'running') {
+            await new Promise((resolve) => setTimeout(resolve, 200));
         }
     }
 

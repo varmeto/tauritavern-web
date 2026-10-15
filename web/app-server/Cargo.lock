@@ -5602,6 +5602,7 @@ dependencies = [
  "mime_guess",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tt-adapter-archive",
  "tt-adapter-extension",

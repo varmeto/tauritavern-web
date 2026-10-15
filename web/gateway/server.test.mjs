@@ -161,7 +161,26 @@ test('serves the application shell only after login and marks browser host mode'
     const page = await fetch(origin, { headers: { Cookie: cookie } });
     assert.equal(page.status, 200);
     assert.match(page.headers.get('content-type'), /text\/html/);
+    assert.ok(page.headers.get('x-tt-web-build'));
     assert.match(await page.text(), /__TAURITAVERN_WEB__=true/);
+
+    const status = await fetch(`${origin}/auth/status`, { headers: { Cookie: cookie } });
+    assert.equal(status.status, 200);
+    const statusBody = await status.json();
+    assert.equal(statusBody.authenticated, true);
+    assert.equal(statusBody.appReady, true);
+    assert.equal(typeof statusBody.build.buildId, 'string');
+
+    const staticAsset = await fetch(`${origin}/init.js`, {
+        headers: { Cookie: cookie, 'Accept-Encoding': 'br' },
+    });
+    assert.equal(staticAsset.status, 200);
+    assert.ok(staticAsset.headers.get('etag'));
+    assert.equal(staticAsset.headers.get('content-encoding'), 'br');
+    const unchanged = await fetch(`${origin}/init.js`, {
+        headers: { Cookie: cookie, 'If-None-Match': staticAsset.headers.get('etag') },
+    });
+    assert.equal(unchanged.status, 304);
 
     const loggedOut = await fetch(`${origin}/logout`, {
         headers: { Cookie: cookie },

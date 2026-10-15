@@ -1132,6 +1132,7 @@ async function firstLoadInit() {
         // Ensure bridge/interceptors are installed before first /api/* calls.
         setStage('core', '启动中：连接后端…');
         await hostReadyPromise;
+        perfMark('tt:startup:host-ready');
         const tauriTavernSettings = await getTauriTavernSettings();
         initializeChatVirtualization(tauriTavernSettings);
         initializeColdSwipes(tauriTavernSettings);
@@ -1186,6 +1187,7 @@ async function firstLoadInit() {
         await initPresetManager();
         await initSystemMessages();
         await applySettingsSnapshot(bootstrapSnapshot.settings);
+        perfMark('tt:startup:core-data-ready');
         void prefetchBackgrounds();
         await checkOpenRouterAuth();
         syncMobileImmersiveFullscreenUi();
@@ -1240,6 +1242,7 @@ async function firstLoadInit() {
                 enableAutoUpdate,
                 parallelism: startupExtensionParallelism,
             });
+            perfMark('tt:startup:extensions-ready');
 
             if (!deferThirdPartyExtensions) {
                 await eventSource.emit(event_types.EXTENSION_SETTINGS_LOADED);
@@ -1260,7 +1263,7 @@ async function firstLoadInit() {
             }
         }
 
-        void autoloadLastChat().catch((error) => {
+        void autoloadLastChat().then(() => perfMark('tt:startup:chat-restored')).catch((error) => {
             console.error('Failed to auto-load the last chat:', error);
             toastr.error(t`Failed to auto-load the last chat. Check the console for details.`);
         });

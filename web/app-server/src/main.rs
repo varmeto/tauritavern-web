@@ -1,5 +1,6 @@
 mod dev_observability;
 mod preset_repository;
+mod web_generation;
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -196,6 +197,7 @@ struct WebHostState {
     cold_chat_sources: Mutex<HashMap<u32, Arc<dyn ChatSwipeSource>>>,
     next_chat_byte_reader: AtomicU32,
     dev_logs: Arc<WebDevObservability>,
+    web_generations: Arc<web_generation::WebGenerationRegistry>,
     services: WebHostServices,
 }
 
@@ -867,6 +869,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             chat_history: history.clone(),
         }),
     ));
+    let web_generations = web_generation::WebGenerationRegistry::load(
+        PathBuf::from(&data_root)
+            .join("_tauritavern")
+            .join("web-generations"),
+        chat_completion.clone(),
+    )
+    .await
+    .map_err(std::io::Error::other)?;
     let state = Arc::new(WebHostState {
         host_resources: HostResourceService::new(
             false,
@@ -879,6 +889,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cold_chat_sources: Mutex::new(HashMap::new()),
         next_chat_byte_reader: AtomicU32::new(1),
         dev_logs,
+        web_generations,
         services: WebHostServices {
             settings: settings_service,
             characters: character_service,
@@ -4777,6 +4788,69 @@ async fn invoke(
                 .await
                 .map(|()| Value::Null)
                 .map_err(|error| error.to_string())
+        }
+        "start_web_generation" => {
+            let dto = match parse_dto(&request.args, "dto") {
+                Ok(dto) => dto,
+                Err(error) => return bad_request(error),
+            };
+            let task_id = string_arg(&request.args, "task_id", "taskId").to_string();
+            let chat_key = string_arg(&request.args, "chat_key", "chatKey").to_string();
+            let revision = string_arg(&request.args, "revision", "revision").to_string();
+            let endpoint = match state
+                .services
+                .chat_completion
+                .resolve_generate_user_endpoint(&dto)
+            {
+                Ok(endpoint) => endpoint,
+                Err(error) => return application_error(error),
+            };
+            if let Some(endpoint) = endpoint
+                && !state.services.endpoint_access.is_granted(&endpoint).await
+            {
+                state
+                    .services
+                    .pending_endpoint_grants
+                    .lock()
+                    .await
+                    .insert(endpoint.clone());
+                return endpoint_confirmation_required(endpoint);
+            }
+            state
+                .web_generations
+                .start(task_id, chat_key, revision, dto)
+                .await
+        }
+        "read_web_generation" => {
+            let task_id = string_arg(&request.args, "task_id", "taskId");
+            let after_seq = request
+                .args
+                .get("after_seq")
+                .or_else(|| request.args.get("afterSeq"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            state.web_generations.read(task_id, after_seq).await
+        }
+        "list_web_generations" => {
+            let chat_key = string_arg(&request.args, "chat_key", "chatKey");
+            Ok(state.web_generations.list(chat_key).await)
+        }
+        "cancel_web_generation" => {
+            let task_id = string_arg(&request.args, "task_id", "taskId");
+            state.web_generations.cancel(task_id).await
+        }
+        "claim_web_generation" => {
+            let task_id = string_arg(&request.args, "task_id", "taskId");
+            let token = string_arg(&request.args, "token", "token");
+            state.web_generations.claim(task_id, token).await
+        }
+        "confirm_web_generation" => {
+            let task_id = string_arg(&request.args, "task_id", "taskId");
+            let token = string_arg(&request.args, "token", "token");
+            state
+                .web_generations
+                .confirm_with_token(task_id, token)
+                .await
         }
         "start_chat_completion_stream" => {
             let dto = match parse_dto(&request.args, "dto") {

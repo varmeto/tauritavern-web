@@ -17,6 +17,7 @@ if (
 }
 
 const PERF_ENABLED = (() => {
+    if (window.__TAURITAVERN_WEB__ === true) return true;
     try {
         if (globalThis.localStorage?.getItem('tt:perf') === '1') {
             return true;
@@ -91,6 +92,7 @@ function normalizeInvokeBytes(value) {
 }
 
 async function setupDevThirdPartyExtensionServiceWorker() {
+    if (window.__TAURITAVERN_WEB__ === true) return;
     if (typeof window === 'undefined') {
         return;
     }
@@ -260,11 +262,16 @@ async function importWithRetry(specifier, retries = 8, delay = 500) {
 }
 
 async function initializeApplication() {
+    let webAdapter = null;
     if (PERF_ENABLED) {
         safePerfMark('tt:init:start');
     }
 
     try {
+        if (window.__TAURITAVERN_WEB__ === true) {
+            webAdapter = await import('./web-adapter.js');
+            await webAdapter.startWebAdapter();
+        }
         if (PERF_ENABLED) {
             safePerfMark('tt:init:dev-sw:start');
         }
@@ -299,6 +306,7 @@ async function initializeApplication() {
             safePerfMark('tt:init:import:app:start');
         }
         await importWithRetry('./script.js');
+        webAdapter?.webAdapterAppReady();
         if (PERF_ENABLED) {
             safePerfMark('tt:init:import:app:end');
             safePerfMeasure('tt:init:import:app', 'tt:init:import:app:start', 'tt:init:import:app:end');

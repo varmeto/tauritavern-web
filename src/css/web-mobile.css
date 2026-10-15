@@ -1,0 +1,53 @@
+html.tt-web-host #tt-web-connection-banner,
+html.tt-web-host #tt-web-update-banner,
+html.tt-web-host #tt-web-generation-banner {
+    position: fixed;
+    z-index: 100000;
+    top: max(8px, env(safe-area-inset-top));
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    max-width: calc(100vw - 24px);
+    padding: 9px 12px;
+    border-radius: 8px;
+    background: #322f39;
+    color: #fff;
+    box-shadow: 0 2px 12px #0008;
+    font: 14px system-ui;
+}
+
+html.tt-web-host #tt-web-update-banner { top: max(52px, calc(env(safe-area-inset-top) + 44px)); }
+html.tt-web-host #tt-web-generation-banner { top: max(96px, calc(env(safe-area-inset-top) + 88px)); }
+html.tt-web-host #tt-web-connection-banner button,
+html.tt-web-host #tt-web-update-banner button,
+html.tt-web-host #tt-web-generation-banner button { flex: none; min-height: 32px; }
+
+html.tt-web-host #tt-web-generation-result {
+    width: min(720px, calc(100vw - 24px));
+    max-height: calc(100dvh - 24px);
+    overflow: auto;
+    background: #29292d;
+    color: #fff;
+    border: 1px solid #666;
+    border-radius: 8px;
+}
+html.tt-web-host #tt-web-generation-result textarea {
+    display: block;
+    box-sizing: border-box;
+    width: 100%;
+    height: min(60dvh, 500px);
+    margin-bottom: 12px;
+}
+
+@media (max-width: 768px) {
+    html.tt-web-host body #sheld {
+        height: calc(var(--tt-web-viewport-height, 100dvh) - var(--topBarBlockSize)) !important;
+        min-height: 0 !important;
+        max-height: calc(var(--tt-web-viewport-height, 100dvh) - var(--topBarBlockSize)) !important;
+    }
+    html.tt-web-host #send_form { padding-bottom: max(4px, env(safe-area-inset-bottom)); }
+    html.tt-web-host .popup,
+    html.tt-web-host .dialogue_popup { max-height: calc(var(--tt-web-viewport-height, 100dvh) - 24px); overflow-y: auto; }
+}

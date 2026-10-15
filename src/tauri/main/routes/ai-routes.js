@@ -17,6 +17,7 @@ import {
 import { registerCaptionRoutes } from './caption-routes.js';
 import { stripCommandErrorPrefixes } from '../../../scripts/util/command-error-utils.js';
 import { createAbortError, isAbortError } from '../kernel/abort-error.js';
+import { getWebGenerationContext } from '../services/ai/web-generation-context.js';
 
 function asObject(value) {
     return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
@@ -348,9 +349,13 @@ function createStreamId() {
         return crypto.randomUUID();
     }
 
-    const timestamp = Date.now().toString(36);
-    const random = Math.random().toString(36).slice(2, 10);
-    return `${timestamp}-${random}`;
+    const bytes = new Uint8Array(16);
+    if (crypto?.getRandomValues) crypto.getRandomValues(bytes);
+    else for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 async function invokeChatCompletionWithAbort(context, payload, signal) {
@@ -395,6 +400,7 @@ async function invokeChatCompletionWithAbort(context, payload, signal) {
 async function createChatCompletionStreamResponse(context, payload, signal, lifecycle) {
     await attachOpenCodeStableChatId(payload);
     const streamId = createStreamId();
+    const webContext = isQuietRequest(payload) ? null : await getWebGenerationContext();
     const encoder = new TextEncoder();
 
     let isClosed = false;
@@ -408,7 +414,11 @@ async function createChatCompletionStreamResponse(context, payload, signal, life
 
     const closeSession = async () => {
         try {
-            await context.safeInvoke('close_chat_completion_stream', { streamId });
+            if (webContext) {
+                if (cancelAfterStart) await context.safeInvoke('cancel_web_generation', { taskId: streamId });
+            } else {
+                await context.safeInvoke('close_chat_completion_stream', { streamId });
+            }
         } catch (error) {
             console.debug('Failed to close chat completion stream:', error);
         }
@@ -477,11 +487,9 @@ async function createChatCompletionStreamResponse(context, payload, signal, life
         }
 
         if (cancelUpstream) {
-            if (!streamStartSettled) {
-                cancelAfterStart = true;
-            }
+            cancelAfterStart = true;
         }
-        if (cancelUpstream || streamStartSettled) {
+        if (cancelUpstream || (streamStartSettled && !webContext)) {
             await closeSession();
         }
 
@@ -551,6 +559,10 @@ async function createChatCompletionStreamResponse(context, payload, signal, life
                 streamId,
                 onEvent: onStreamEvent,
                 isClosed: () => isClosed,
+                ...(webContext ? {
+                    readCommand: 'read_web_generation',
+                    readArgs: (taskId, afterSeq) => ({ taskId, afterSeq }),
+                } : {}),
             });
             if (status === 'done') {
                 await closeStream({ appendDone: true });
@@ -577,7 +589,7 @@ async function createChatCompletionStreamResponse(context, payload, signal, life
 
             if (signal) {
                 abortHandler = () => {
-                    void closeStream({ cancelUpstream: true });
+                    void closeStream({ cancelUpstream: !window.__TT_WEB_UNLOADING__ });
                 };
 
                 if (signal.aborted) {
@@ -589,17 +601,30 @@ async function createChatCompletionStreamResponse(context, payload, signal, life
             }
 
             try {
-                await context.safeInvoke('start_chat_completion_stream', {
-                    streamId,
-                    dto: payload,
-                    locale: getSillyTavernLocale(),
-                });
+                if (webContext) {
+                    await context.safeInvoke('start_web_generation', {
+                        taskId: streamId,
+                        chatKey: webContext.chatKey,
+                        revision: webContext.revision,
+                        dto: payload,
+                        locale: getSillyTavernLocale(),
+                    });
+                    window.dispatchEvent(new CustomEvent('tt-web-generation-started', {
+                        detail: { taskId: streamId, ...webContext },
+                    }));
+                } else {
+                    await context.safeInvoke('start_chat_completion_stream', {
+                        streamId,
+                        dto: payload,
+                        locale: getSillyTavernLocale(),
+                    });
+                }
 
                 // If abort happened while stream registration was in-flight, run cancellation again
                 // after start settles to avoid a missed pre-registration cancel race.
                 if (cancelAfterStart) {
                     cancelAfterStart = false;
-                    await closeSession();
+                    if (!webContext || !window.__TT_WEB_UNLOADING__) await closeSession();
                 }
             } catch (error) {
                 if (isRequestCancelled(error)) {
@@ -621,7 +646,7 @@ async function createChatCompletionStreamResponse(context, payload, signal, life
             }
         },
         async cancel() {
-            await closeStream({ cancelUpstream: true });
+            await closeStream({ cancelUpstream: !window.__TT_WEB_UNLOADING__ });
         },
     });
 

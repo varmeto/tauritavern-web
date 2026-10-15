@@ -1,0 +1,10 @@
+ARG APP_IMAGE=tt-web-app:validation-amd64
+FROM ${APP_IMAGE} AS app
+
+FROM node:24-bookworm-slim
+RUN apt-get update && apt-get install --yes --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+COPY . .
+COPY --from=app /usr/local/bin/tt-web-host /usr/local/bin/tt-web-host
+ENV TT_WEB_SMOKE_SKIP_BUILD=1 TT_WEB_SMOKE_APP_BINARY=/usr/local/bin/tt-web-host
+CMD ["node", "--test", "tests/web/app-server-smoke.test.mjs"]

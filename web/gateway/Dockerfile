@@ -1,11 +1,13 @@
 FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS frontend-build
 
+ARG TT_WEB_ADAPTER_COMMIT=unknown
+
 WORKDIR /workspace
 RUN corepack enable && corepack prepare pnpm@11.22.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY . .
-RUN pnpm run web:build && pnpm run web:gateway:test
+RUN TT_WEB_ADAPTER_COMMIT="$TT_WEB_ADAPTER_COMMIT" pnpm run web:build && pnpm run web:gateway:test
 
 FROM node:24-alpine AS gateway
 

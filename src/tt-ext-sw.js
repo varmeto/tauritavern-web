@@ -12,6 +12,26 @@ const USER_AVATARS_ROUTE_PREFIX_ENCODED = '/User%20Avatars/';
 const PROXY_REQUEST_MESSAGE_TYPE = 'tt-ext-proxy-request';
 const PROXY_READY_MESSAGE_TYPE = 'tt-ext-proxy-ready';
 const CLIENT_BRIDGE_TIMEOUT_MS = 8000;
+const webBuildId = new URL(self.location.href).searchParams.get('web-build');
+const webCacheName = webBuildId ? `tt-web-static-${webBuildId}` : null;
+let webStaticAssets = new Set();
+let webManifestPromise = null;
+let webCacheValid = true;
+
+async function ensureWebManifest() {
+    if (!webBuildId || webStaticAssets.size > 0) return;
+    if (!webManifestPromise) {
+        webManifestPromise = fetch('/__tt_web_build.json', { cache: 'no-store', credentials: 'same-origin' })
+            .then(async (response) => {
+                if (!response.ok) throw new Error(`Web build manifest unavailable: ${response.status}`);
+                const manifest = await response.json();
+                if (manifest.buildId !== webBuildId) throw new Error('Web build version mismatch');
+                webStaticAssets = new Set(Object.keys(manifest.assets || {}));
+            })
+            .finally(() => { webManifestPromise = null; });
+    }
+    return webManifestPromise;
+}
 const FORWARDED_REQUEST_HEADERS = [
     'range',
     'if-range',
@@ -74,15 +94,66 @@ self.addEventListener('message', (event) => {
 });
 
 self.addEventListener('install', (event) => {
-    event.waitUntil(self.skipWaiting());
+    event.waitUntil((async () => {
+        if (webBuildId) {
+            const response = await fetch('/__tt_web_build.json', { cache: 'no-store', credentials: 'same-origin' });
+            if (!response.ok) throw new Error(`Web build manifest unavailable: ${response.status}`);
+            const manifest = await response.json();
+            if (manifest.buildId !== webBuildId) throw new Error('Web build changed during service worker install');
+            webStaticAssets = new Set(Object.keys(manifest.assets || {}));
+        }
+        await self.skipWaiting();
+    })());
 });
 
 self.addEventListener('activate', (event) => {
-    event.waitUntil(self.clients.claim());
+    event.waitUntil((async () => {
+        if (webCacheName) {
+            const keys = await caches.keys();
+            await Promise.all(keys.filter((key) => key.startsWith('tt-web-static-') && key !== webCacheName)
+                .map((key) => caches.delete(key)));
+            if (webStaticAssets.size === 0) {
+                const response = await fetch('/__tt_web_build.json', { cache: 'no-store', credentials: 'same-origin' });
+                if (response.ok) {
+                    const manifest = await response.json();
+                    if (manifest.buildId === webBuildId) webStaticAssets = new Set(Object.keys(manifest.assets || {}));
+                }
+            }
+        }
+        await self.clients.claim();
+    })());
 });
 
 self.addEventListener('fetch', (event) => {
     const requestUrl = new URL(event.request.url);
+    if (webCacheName) {
+        if (event.request.mode === 'navigate') {
+            event.respondWith(fetch(event.request).then((response) => {
+                if (response.headers.get('X-TT-Web-Build') !== webBuildId) webCacheValid = false;
+                return response;
+            }));
+            return;
+        }
+        if (event.request.method === 'GET'
+            && requestUrl.origin === self.location.origin
+            && requestUrl.search === ''
+            && /\.(?:js|mjs|css|svg|woff2?|ttf|wasm)$/i.test(requestUrl.pathname)) {
+            event.respondWith((async () => {
+                await ensureWebManifest();
+                if (!webStaticAssets.has(requestUrl.pathname)) return fetch(event.request);
+                if (!webCacheValid) return fetch(event.request);
+                const cache = await caches.open(webCacheName);
+                const cached = await cache.match(event.request);
+                if (cached) return cached;
+                const response = await fetch(event.request);
+                if (response.ok && !response.redirected && !response.headers.get('content-type')?.includes('text/html')) {
+                    await cache.put(event.request, response.clone());
+                }
+                return response;
+            })());
+        }
+        return;
+    }
     if (!shouldProxyRequestPath(requestUrl.pathname)) {
         return;
     }

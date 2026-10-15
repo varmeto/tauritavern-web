@@ -1,11 +1,18 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { createReadStream, realpathSync, statSync } from 'node:fs';
+import { createReadStream, readFileSync, realpathSync, statSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createBrotliCompress, createGzip } from 'node:zlib';
 
 const gatewayDir = path.dirname(fileURLToPath(import.meta.url));
 const frontendRoot = realpathSync(path.resolve(gatewayDir, '../../src'));
+let buildManifest = null;
+try {
+    buildManifest = JSON.parse(readFileSync(path.join(frontendRoot, '__tt_web_build.json'), 'utf8'));
+} catch {
+    buildManifest = { upstreamVersion: 'unknown', upstreamCommit: 'unknown', webAdapterVersion: 'v1', webAdapterCommit: 'unknown', buildId: 'development', assets: {} };
+}
 const port = Number(process.env.PORT || 8080);
 const password = process.env.TT_WEB_PASSWORD;
 const backendUrl = new URL(process.env.TT_BACKEND_URL || 'http://app:3093');
@@ -49,6 +56,15 @@ function hasSession(request) {
     } catch {
         return false;
     }
+}
+
+function sessionExpiresAt(request) {
+    const cookie = (request.headers.cookie || '').split(';').map((part) => part.trim())
+        .find((part) => part.startsWith(`${cookieName}=`));
+    if (!cookie) return null;
+    const value = decodeURIComponent(cookie.slice(cookieName.length + 1));
+    const expiresAt = Number(value.split('.', 1)[0]);
+    return Number.isSafeInteger(expiresAt) ? expiresAt : null;
 }
 
 function setSessionCookie(request, response, value, maxAge) {
@@ -225,11 +241,33 @@ const server = createServer(async (request, response) => {
     }
 
     if (!hasSession(request)) {
-        if (pathname.startsWith('/api/') || pathname.startsWith('/__tt/')) {
+        if (pathname.startsWith('/api/') || pathname.startsWith('/__tt/') || pathname.startsWith('/auth/')) {
             return respondJson(response, 401, { error: 'Authentication required' });
         }
         response.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' });
         return response.end();
+    }
+
+    if (pathname === '/auth/status' && request.method === 'GET') {
+        let appReady = false;
+        try {
+            const backendResponse = await fetch(new URL('/healthz', backendUrl), { signal: AbortSignal.timeout(2000) });
+            appReady = backendResponse.ok;
+        } catch {
+            // The authenticated browser still needs a status response while the app restarts.
+        }
+        return respondJson(response, 200, {
+            authenticated: true,
+            appReady,
+            sessionExpiresAt: sessionExpiresAt(request),
+            build: {
+                upstreamVersion: buildManifest.upstreamVersion,
+                upstreamCommit: buildManifest.upstreamCommit,
+                webAdapterVersion: buildManifest.webAdapterVersion,
+                webAdapterCommit: buildManifest.webAdapterCommit,
+                buildId: buildManifest.buildId,
+            },
+        });
     }
 
     if (request.method !== 'GET' && request.method !== 'HEAD') return proxyRequest(request, response);
@@ -251,18 +289,61 @@ const server = createServer(async (request, response) => {
             return respondJson(response, 404, { error: 'Not found' });
         }
         if (!statSync(filePath).isFile()) throw new Error('Not a file');
-        response.writeHead(200, {
-            'Content-Type': getContentType(filePath),
-            'Cache-Control': filePath.endsWith('.html') ? 'no-store' : 'private, max-age=300',
-            'X-Content-Type-Options': 'nosniff',
-        });
-        if (request.method === 'HEAD') return response.end();
-        if (filePath.endsWith('.html')) {
+        const isHtml = filePath.endsWith('.html');
+        const isManifest = pathname === '/__tt_web_build.json';
+        if (isHtml || isManifest) {
+            response.writeHead(200, {
+                'Content-Type': getContentType(filePath),
+                'Cache-Control': 'no-store',
+                'X-Content-Type-Options': 'nosniff',
+                ...(isHtml ? { 'X-TT-Web-Build': buildManifest.buildId } : {}),
+            });
+            if (request.method === 'HEAD') return response.end();
+        }
+        if (isHtml) {
             let html = await (await import('node:fs/promises')).readFile(filePath, 'utf8');
-            html = html.replace('</head>', '<script>window.__TAURITAVERN_WEB__=true;</script></head>');
+            const build = JSON.stringify({
+                upstreamVersion: buildManifest.upstreamVersion,
+                upstreamCommit: buildManifest.upstreamCommit,
+                webAdapterVersion: buildManifest.webAdapterVersion,
+                webAdapterCommit: buildManifest.webAdapterCommit,
+                buildId: buildManifest.buildId,
+            }).replaceAll('<', '\\u003c');
+            html = html.replace('</head>', `<link rel="stylesheet" href="/css/web-mobile.css"><script>window.__TAURITAVERN_WEB__=true;window.__TT_WEB_BUILD__=${build};</script></head>`);
             return response.end(html);
         }
-        return createReadStream(filePath).pipe(response);
+        if (isManifest) return createReadStream(filePath).pipe(response);
+
+        const relative = `/${path.relative(frontendRoot, filePath).replaceAll(path.sep, '/')}`;
+        const hash = buildManifest.assets?.[relative];
+        const metadata = statSync(filePath);
+        const etag = hash ? `"${hash}"` : `W/"${metadata.size}-${Math.floor(metadata.mtimeMs)}"`;
+        const contentType = getContentType(filePath);
+        const compressible = /^(text\/|application\/(?:json|javascript|wasm))/.test(contentType)
+            && metadata.size >= 1024 && !request.headers.range;
+        const acceptedEncoding = String(request.headers['accept-encoding'] || '');
+        const encoding = compressible && /(?:^|,)\s*br(?:\s*;|\s*,|$)/.test(acceptedEncoding)
+            ? 'br'
+            : compressible && /(?:^|,)\s*gzip(?:\s*;|\s*,|$)/.test(acceptedEncoding) ? 'gzip' : null;
+        const headers = {
+            'Content-Type': contentType,
+            'Cache-Control': 'private, max-age=0, must-revalidate',
+            'X-Content-Type-Options': 'nosniff',
+            ETag: etag,
+            'Last-Modified': metadata.mtime.toUTCString(),
+            Vary: 'Accept-Encoding',
+            ...(encoding ? { 'Content-Encoding': encoding } : {}),
+        };
+        if (request.headers['if-none-match'] === etag) {
+            response.writeHead(304, headers);
+            return response.end();
+        }
+        response.writeHead(200, headers);
+        if (request.method === 'HEAD') return response.end();
+        const body = createReadStream(filePath);
+        if (encoding === 'br') return body.pipe(createBrotliCompress()).pipe(response);
+        if (encoding === 'gzip') return body.pipe(createGzip()).pipe(response);
+        return body.pipe(response);
     } catch {
         return proxyRequest(request, response);
     }

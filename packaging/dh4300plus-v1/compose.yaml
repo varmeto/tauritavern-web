@@ -1,6 +1,8 @@
+name: tauritavern-web
+
 services:
   app:
-    image: tauritavern-web-app:2.3.0-v1-arm64
+    image: tauritavern-web-app:${TT_RELEASE_TAG:-2.3.0-v1.1-arm64}
     platform: linux/arm64
     expose:
       - "3093"
@@ -14,7 +16,7 @@ services:
     restart: unless-stopped
 
   gateway:
-    image: tauritavern-web-gateway:2.3.0-v1-arm64
+    image: tauritavern-web-gateway:${TT_RELEASE_TAG:-2.3.0-v1.1-arm64}
     platform: linux/arm64
     depends_on:
       app:
@@ -24,7 +26,7 @@ services:
       TT_BACKEND_URL: http://app:3093
       TT_WEB_PASSWORD: ${TT_WEB_PASSWORD:?Set TT_WEB_PASSWORD in .env}
     ports:
-      - "${TT_WEB_PORT:-8081}:8080"
+      - "${TT_WEB_PORT:-40377}:8080"
     networks:
       - tauritavern
     restart: unless-stopped
@@ -35,3 +37,5 @@ networks:
 
 volumes:
   tauritavern-data:
+    external: true
+    name: ${TT_DATA_VOLUME:?Set TT_DATA_VOLUME to the existing NAS Docker volume name before upgrading}

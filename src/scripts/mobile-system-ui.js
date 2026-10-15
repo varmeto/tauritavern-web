@@ -3,6 +3,7 @@ import { isMobile } from './RossAscends-mods.js';
 const ANDROID_SYSTEM_UI_BRIDGE_NAME = 'TauriTavernAndroidSystemUiBridge';
 
 function getAndroidSystemUiBridge() {
+    if (window.__TAURITAVERN_WEB__ === true) return null;
     if (!isMobile()) {
         return null;
     }

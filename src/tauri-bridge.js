@@ -1,6 +1,7 @@
 // Core Tauri bridge for frontend modules.
 
 import { SILLYTAVERN_COMPAT_VERSION } from './compat-version.js';
+import { listenWebEvent } from './web-event-bridge.js';
 
 function detectTauriEnv() {
     if (typeof window === 'undefined') {
@@ -30,11 +31,12 @@ function isWebHost() {
 
 async function invokeWeb(command, args, options) {
     if (command === 'get_client_version') {
+        const build = window.__TT_WEB_BUILD__ || {};
         return {
-            agent: 'SillyTavern:1.18.0:TauriTavern',
-            pkgVersion: '1.18.0',
-            tauriVersion: '2.3.0-web',
-            gitRevision: null,
+            agent: `SillyTavern:${SILLYTAVERN_COMPAT_VERSION}:TauriTavern`,
+            pkgVersion: SILLYTAVERN_COMPAT_VERSION,
+            tauriVersion: `${build.upstreamVersion || 'unknown'}-web-${build.webAdapterVersion || 'v1'}`,
+            gitRevision: build.upstreamCommit || null,
             gitBranch: null,
             defaultUpdateChannel: 'stable',
         };
@@ -262,32 +264,7 @@ export const listen = (...args) => {
     if (typeof fn === 'function') return fn(...args);
     if (!isWebHost()) throw new Error('Tauri listen is unavailable');
 
-    const [eventName, handler] = args;
-    if (typeof eventName !== 'string' || typeof handler !== 'function') {
-        throw new Error('Invalid web event subscription');
-    }
-
-    return new Promise((resolve, reject) => {
-        const socket = new WebSocket(getWebSocketUrl('/__tt/events', { event: eventName }));
-        let opened = false;
-        socket.addEventListener('open', () => {
-            opened = true;
-            resolve(() => socket.close(1000, 'unlisten'));
-        }, { once: true });
-        socket.addEventListener('message', (message) => {
-            try {
-                handler(JSON.parse(message.data));
-            } catch (error) {
-                console.error(`Invalid event payload for ${eventName}`, error);
-            }
-        });
-        socket.addEventListener('error', () => {
-            if (!opened) reject(new Error(`Unable to subscribe to ${eventName}`));
-        }, { once: true });
-        socket.addEventListener('close', () => {
-            if (!opened) reject(new Error(`Event subscription closed before ready: ${eventName}`));
-        }, { once: true });
-    });
+    return listenWebEvent(args[0], args[1]);
 };
 
 export function createChannel(onmessage) {

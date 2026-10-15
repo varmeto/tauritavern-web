@@ -32,6 +32,9 @@ FasTools.exe
 
 # Build artifacts
 release
+.web-build/
+web/app-server/target/
+src/__tt_web_build.json
 .flatpak-build/
 .flatpak-builder/
 packaging/flatpak/build-identity.env

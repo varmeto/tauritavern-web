@@ -10,7 +10,7 @@ import test from 'node:test';
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const appManifest = path.join('web', 'app-server', 'Cargo.toml');
-const appBinary = path.join(
+const appBinary = process.env.TT_WEB_SMOKE_APP_BINARY || path.join(
     repositoryRoot,
     'web',
     'app-server',
@@ -85,12 +85,14 @@ async function invoke(baseUrl, command, args = {}) {
 }
 
 test('web app bootstraps, persists data across restart, and imports staged world info', { timeout: 600_000 }, async (t) => {
-    const build = spawnSync('cargo', ['build', '--locked', '--manifest-path', appManifest], {
-        cwd: repositoryRoot,
-        encoding: 'utf8',
-        timeout: 480_000,
-    });
-    assert.equal(build.status, 0, `Rust host build failed:\n${build.stdout}\n${build.stderr}`);
+    if (process.env.TT_WEB_SMOKE_SKIP_BUILD !== '1') {
+        const build = spawnSync('cargo', ['build', '--locked', '--manifest-path', appManifest], {
+            cwd: repositoryRoot,
+            encoding: 'utf8',
+            timeout: 480_000,
+        });
+        assert.equal(build.status, 0, `Rust host build failed:\n${build.stdout}\n${build.stderr}`);
+    }
 
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'tt-web-host-smoke-'));
     const port = await getAvailablePort();
@@ -383,6 +385,7 @@ test('web app bootstraps, persists data across restart, and imports staged world
     assert.equal((await invoke(baseUrl, 'get_character', { name: character.name })).name, character.name);
 
     let providerRequests = 0;
+    let providerDelayMs = 15;
     const provider = createServer((request, response) => {
         providerRequests += 1;
         request.resume();
@@ -390,7 +393,7 @@ test('web app bootstraps, persists data across restart, and imports staged world
         response.write('data: {"choices":[{"index":0,"delta":{"content":"Hello from the mock."},"finish_reason":null}]}\n\n');
         setTimeout(() => {
             response.end('data: [DONE]\n\n');
-        }, 15);
+        }, providerDelayMs);
     });
     await new Promise((resolve, reject) => {
         provider.once('error', reject);
@@ -434,8 +437,36 @@ test('web app bootstraps, persists data across restart, and imports staged world
     assert.equal(streamResult.status, 'done', JSON.stringify(streamResult));
     assert.ok(streamResult.events.some((event) => event.type === 'chunk'));
     assert.equal(providerRequests, 1);
+    const webTaskId = crypto.randomUUID();
+    const webTaskArgs = {
+        taskId: webTaskId,
+        chatKey: 'character:smoke:chat',
+        revision: 'smoke-revision',
+        dto: streamPayload,
+    };
+    const startedWebTask = await invoke(baseUrl, 'start_web_generation', webTaskArgs);
+    assert.equal(startedWebTask.taskId, webTaskId);
+    assert.equal((await invoke(baseUrl, 'start_web_generation', webTaskArgs)).taskId, webTaskId);
+    let webTaskResult;
+    const webTaskDeadline = Date.now() + 10_000;
+    do {
+        webTaskResult = await invoke(baseUrl, 'read_web_generation', { taskId: webTaskId, afterSeq: 0 });
+        if (webTaskResult.status !== 'running') break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    } while (Date.now() < webTaskDeadline);
+    assert.equal(webTaskResult.status, 'done', JSON.stringify(webTaskResult));
+    assert.ok(webTaskResult.events.some((event) => event.type === 'chunk'));
+    assert.deepEqual((await invoke(baseUrl, 'read_web_generation', { taskId: webTaskId, afterSeq: 0 })).events, webTaskResult.events);
+    assert.equal(providerRequests, 2);
+    const taskList = await invoke(baseUrl, 'list_web_generations', { chatKey: webTaskArgs.chatKey });
+    assert.equal(taskList.length, 1);
+    assert.equal(taskList[0].taskId, webTaskId);
+    assert.equal(taskList[0].requestDigest, undefined);
+    const claimToken = crypto.randomUUID();
+    assert.equal((await invoke(baseUrl, 'claim_web_generation', { taskId: webTaskId, token: claimToken })).acquired, true);
+    assert.equal((await invoke(baseUrl, 'confirm_web_generation', { taskId: webTaskId, token: claimToken })).confirmedAt > 0, true);
     const llmLogs = await invoke(baseUrl, 'devlog_get_llm_api_log_index', { limit: 10 });
-    assert.equal(llmLogs.length, 1);
+    assert.equal(llmLogs.length, 2);
     assert.equal(llmLogs[0].source, 'custom');
     assert.equal(llmLogs[0].model, 'smoke-model');
     assert.equal(llmLogs[0].stream, true);
@@ -496,12 +527,36 @@ test('web app bootstraps, persists data across restart, and imports staged world
         dto: { name: 'web-smoke', data: { entries: {} } },
     });
 
+    providerDelayMs = 5_000;
+    const interruptedTaskId = crypto.randomUUID();
+    await invoke(baseUrl, 'start_web_generation', {
+        taskId: interruptedTaskId,
+        chatKey: 'character:smoke:interrupted',
+        revision: 'before-restart',
+        dto: streamPayload,
+    });
+    let partial;
+    const partialDeadline = Date.now() + 5_000;
+    do {
+        partial = await invoke(baseUrl, 'read_web_generation', { taskId: interruptedTaskId, afterSeq: 0 });
+        if (partial.events.some((event) => event.type === 'chunk')) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    } while (Date.now() < partialDeadline);
+    assert.ok(partial.events.some((event) => event.type === 'chunk'));
+    assert.equal(partial.status, 'running');
+
     await stopApp(app);
     app = startApp(dataRoot, port);
     await waitForHealth(app, baseUrl);
+    const recoveredWebTask = await invoke(baseUrl, 'read_web_generation', { taskId: webTaskId, afterSeq: 0 });
+    assert.equal(recoveredWebTask.status, 'done');
+    assert.deepEqual(recoveredWebTask.events, webTaskResult.events);
+    const interrupted = await invoke(baseUrl, 'read_web_generation', { taskId: interruptedTaskId, afterSeq: 0 });
+    assert.equal(interrupted.status, 'interrupted');
+    assert.ok(interrupted.events.some((event) => event.type === 'chunk'));
     const persistedWorld = await invoke(baseUrl, 'get_world_info', { dto: { name: 'web-smoke' } });
     assert.deepEqual(persistedWorld, { entries: {} });
-    assert.equal((await invoke(baseUrl, 'devlog_get_llm_api_log_index', { limit: 10 })).length, 1);
+    assert.ok((await invoke(baseUrl, 'devlog_get_llm_api_log_index', { limit: 10 })).length >= 2);
     assert.ok((await invoke(baseUrl, 'list_presets', { apiId: 'openai' })).includes('web-smoke-preset'));
     assert.equal(await invoke(baseUrl, 'preset_exists', {
         name: 'web-smoke-preset',
