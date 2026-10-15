@@ -18,6 +18,7 @@ const jobState = {
     starting: false,
     cancelRequested: false,
     lastExportSavedPath: '',
+    uploadController: null,
 };
 
 function extractErrorMessage(text) {
@@ -105,7 +106,7 @@ async function pickNasImportArchive() {
 
     const archives = await response.json();
     if (!Array.isArray(archives) || archives.length === 0) {
-        toastr.warning(t`No supported archive files found in the NAS import folder`);
+        toastr.warning(t`No supported archive files found in the server import folder`);
         return null;
     }
 
@@ -120,7 +121,7 @@ async function pickNasImportArchive() {
     }
     const content = document.createElement('div');
     const label = document.createElement('label');
-    label.textContent = t`Select an archive already stored on the NAS`;
+    label.textContent = t`Select an archive already stored on the server`;
     label.append(select);
     content.append(label);
 
@@ -153,6 +154,157 @@ async function startImportJobFromNasArchive(fileName) {
         },
         body: JSON.stringify({ file_name: fileName }),
     });
+}
+
+function pickBrowserArchive() {
+    return new Promise((resolve) => {
+        const input = document.getElementById('data_migration_import_file');
+        if (!(input instanceof HTMLInputElement)) {
+            resolve(null);
+            return;
+        }
+        const finish = () => {
+            const file = input.files?.[0] || null;
+            input.removeEventListener('change', finish);
+            input.removeEventListener('cancel', finish);
+            resolve(file);
+        };
+        input.value = '';
+        input.addEventListener('change', finish, { once: true });
+        input.addEventListener('cancel', finish, { once: true });
+        input.click();
+    });
+}
+
+async function sendImportChunk(id, offset, chunk, fileSize, signal) {
+    const end = offset + chunk.size;
+    for (let attempt = 0; attempt < 4; attempt++) {
+        if (signal.aborted) {
+            throw new Error(t`Upload cancelled`);
+        }
+        let retryReason = '';
+        try {
+            const response = await fetch(`/__tt/import-uploads?id=${encodeURIComponent(id)}&offset=${offset}`, {
+                method: 'PUT',
+                body: chunk,
+                credentials: 'same-origin',
+                signal,
+            });
+            const result = await response.json().catch(() => ({}));
+            if (response.ok && result.offset === end) {
+                setProgress(end / fileSize * 100);
+                setStatusText(`${t`Uploading archive...`} ${formatArchiveSize(end)} / ${formatArchiveSize(fileSize)}`);
+                return;
+            }
+            if (response.status === 409 && result.offset === end) {
+                setProgress(end / fileSize * 100);
+                return;
+            }
+            if (![408, 429, 502, 503, 504].includes(response.status)) {
+                throw new Error(result.error || `Upload failed (${response.status})`);
+            }
+            retryReason = result.error || `Upload failed (${response.status})`;
+        } catch (error) {
+            if (signal.aborted || !/Failed to fetch|NetworkError|Load failed/i.test(String(error))) {
+                throw error;
+            }
+            retryReason = String(error);
+        }
+        if (attempt === 3) {
+            throw new Error(`${retryReason}; ${t`Try the server import folder.`}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
+    }
+}
+
+async function startImportJobFromBrowserFile(file) {
+    const controller = new AbortController();
+    jobState.uploadController = controller;
+    refreshControls();
+    let id = '';
+    let submitted = false;
+    try {
+        const response = await fetch('/__tt/import-uploads', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_name: file.name, size: file.size }),
+            signal: controller.signal,
+        });
+        if (!response.ok) {
+            if ([408, 413, 502, 504].includes(response.status)) {
+                throw new Error(t`Upload connection was rejected. Try the server import folder.`);
+            }
+            throw new Error(await readFailureMessage(response));
+        }
+        const session = await response.json();
+        id = String(session?.id || '');
+        const chunkSize = Number(session?.chunk_bytes);
+        if (!id || !Number.isSafeInteger(chunkSize) || chunkSize <= 0) {
+            throw new Error(t`Upload session is invalid`);
+        }
+        setProgress(0);
+        setStatusText(t`Uploading archive...`);
+        for (let offset = 0; offset < file.size; offset += chunkSize) {
+            await sendImportChunk(id, offset, file.slice(offset, offset + chunkSize), file.size, controller.signal);
+        }
+        const finishResponse = await fetch(`/__tt/import-uploads/finish?id=${encodeURIComponent(id)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ file_name: file.name, size: file.size }),
+            signal: controller.signal,
+        });
+        if (!finishResponse.ok) {
+            if ([408, 413, 502, 504].includes(finishResponse.status)) {
+                throw new Error(t`Upload connection was rejected. Try the server import folder.`);
+            }
+            throw new Error(await readFailureMessage(finishResponse));
+        }
+        const finished = await finishResponse.json();
+        setStatusText(t`Upload complete. Starting import...`);
+        jobState.uploadController = null;
+        refreshControls();
+        const jobId = await requestImportJob('/api/extensions/data-migration/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ archive_path: finished.archive_path }),
+        });
+        submitted = true;
+        return jobId;
+    } finally {
+        jobState.uploadController = null;
+        refreshControls();
+        if (id && !submitted) {
+            await fetch(`/__tt/import-uploads?id=${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {});
+        }
+    }
+}
+
+async function onWebImportFromComputer() {
+    if (hasActiveJob()) {
+        toastr.warning(t`A migration job is already running`);
+        return;
+    }
+    const file = await pickBrowserArchive();
+    if (file) {
+        await runConfirmedImport(() => startImportJobFromBrowserFile(file));
+    }
+}
+
+async function onWebImportFromServer() {
+    if (hasActiveJob()) {
+        toastr.warning(t`A migration job is already running`);
+        return;
+    }
+    try {
+        const fileName = await pickNasImportArchive();
+        if (fileName) {
+            await runConfirmedImport(() => startImportJobFromNasArchive(fileName));
+        }
+    } catch (error) {
+        const message = `${normalizeCaughtError(error)}. ${t`Check the server imports folder mount, or upload from this device.`}`;
+        toastr.error(message, t`Data import failed`);
+        setStatusText(message);
+    }
 }
 
 async function startImportJobFromAndroidContentUri(contentUri) {
@@ -312,6 +464,7 @@ function refreshExportActions() {
 function refreshControls() {
     const busy = hasActiveJob();
     $('#data_migration_import_button').prop('disabled', busy);
+    $('#data_migration_import_local_button, #data_migration_import_server_button').prop('disabled', busy);
     $('#data_migration_export_button').prop('disabled', busy);
     if (busy) {
         $('#data_migration_reveal_export_button').prop('disabled', true);
@@ -320,7 +473,7 @@ function refreshControls() {
     }
 
     const cancelButton = $('#data_migration_cancel_button');
-    if (jobState.jobId) {
+    if (jobState.jobId || jobState.uploadController) {
         cancelButton.show();
         cancelButton.prop('disabled', jobState.cancelRequested);
         return;
@@ -348,6 +501,7 @@ function stopJobTracking() {
     jobState.jobId = '';
     jobState.starting = false;
     jobState.cancelRequested = false;
+    jobState.uploadController = null;
     hideProgress();
     refreshControls();
 }
@@ -386,15 +540,6 @@ async function onImportButtonClick() {
 
         if (isIosRuntime()) {
             await onIosImportButtonClick();
-            return;
-        }
-
-        if (isWebRuntime()) {
-            const fileName = await pickNasImportArchive();
-            if (!fileName) {
-                return;
-            }
-            await runConfirmedImport(() => startImportJobFromNasArchive(fileName));
             return;
         }
 
@@ -486,6 +631,11 @@ function reloadSoon() {
 }
 
 async function requestCancelActiveJob() {
+    if (jobState.uploadController) {
+        jobState.uploadController.abort();
+        setStatusText(t`Upload cancelled`);
+        return;
+    }
     if (!hasRunningJob() || jobState.cancelRequested) {
         return;
     }
@@ -687,6 +837,12 @@ jQuery(async () => {
     }
 
     $('#data_migration_import_button').on('click', onImportButtonClick);
+    if (isWebRuntime()) {
+        $('#data_migration_import_button').hide();
+        $('#data_migration_import_local_button, #data_migration_import_server_button, #data_migration_web_import_tip').show();
+        $('#data_migration_import_local_button').on('click', onWebImportFromComputer);
+        $('#data_migration_import_server_button').on('click', onWebImportFromServer);
+    }
     $('#data_migration_export_button').on('click', onExportClick);
     $('#data_migration_cancel_button').on('click', requestCancelActiveJob);
     $('#data_migration_reveal_export_button').on('click', onRevealExportClick);

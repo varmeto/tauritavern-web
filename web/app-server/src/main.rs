@@ -18,7 +18,7 @@ use std::{
 use async_trait::async_trait;
 use axum::{
     Router,
-    body::Body,
+    body::{Body, to_bytes},
     extract::{
         DefaultBodyLimit, Json, Query, State,
         ws::{WebSocket, WebSocketUpgrade},
@@ -193,6 +193,8 @@ struct WebHostState {
     data_root: PathBuf,
     import_root: PathBuf,
     archive_root: PathBuf,
+    import_max_bytes: u64,
+    import_upload_lock: Mutex<()>,
     channels: Mutex<HashMap<String, mpsc::UnboundedSender<Value>>>,
     chat_byte_readers: Mutex<HashMap<u32, WebChatByteReader>>,
     cold_chat_sources: Mutex<HashMap<u32, Arc<dyn ChatSwipeSource>>>,
@@ -523,6 +525,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_root = env::var("TT_DATA_DIR").unwrap_or_else(|_| "/data".to_string());
     tokio::fs::create_dir_all(&data_root).await?;
     let import_root = env::var("TT_IMPORT_DIR").unwrap_or_else(|_| "/imports".to_string());
+    let import_max_bytes = env::var("TT_WEB_IMPORT_MAX_BYTES")
+        .ok()
+        .map(|value| value.parse::<u64>())
+        .transpose()?
+        .unwrap_or(4 * 1024 * 1024 * 1024);
+    if import_max_bytes == 0 {
+        return Err("TT_WEB_IMPORT_MAX_BYTES must be positive".into());
+    }
     let port = env::var("PORT")
         .ok()
         .map(|value| value.parse::<u16>())
@@ -858,6 +868,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
         Arc::new(WebDataArchiveFileGateway::new(
             PathBuf::from(&data_root),
+            PathBuf::from(&import_root),
             archive_root.clone(),
         )),
         Arc::new(WebDataRootInitializer),
@@ -887,6 +898,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         data_root: PathBuf::from(&data_root),
         import_root: PathBuf::from(&import_root),
         archive_root,
+        import_max_bytes,
+        import_upload_lock: Mutex::new(()),
         channels: Mutex::new(HashMap::new()),
         chat_byte_readers: Mutex::new(HashMap::new()),
         cold_chat_sources: Mutex::new(HashMap::new()),
@@ -935,6 +948,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ios_policy,
         },
     });
+    let cleanup_root = state.data_root.join("_tauritavern").join("web-imports");
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            cleanup_old_import_uploads(&cleanup_root).await;
+        }
+    });
     let router = Router::new()
         .route("/healthz", get(health))
         .route("/__tt/ready", get(ready))
@@ -947,6 +968,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/__tt/channels", get(channel_socket))
         .route("/__tt/file", get(read_data_file))
         .route("/__tt/uploads", post(stage_upload).delete(discard_upload))
+        .route(
+            "/__tt/import-uploads",
+            post(begin_import_upload)
+                .put(append_import_upload)
+                .delete(discard_import_upload),
+        )
+        .route("/__tt/import-uploads/finish", post(finish_import_upload))
         .route("/api/bootstrap", post(api_bootstrap))
         .fallback(serve_host_resource)
         .with_state(state);
@@ -1003,6 +1031,215 @@ struct UploadQuery {
     extension: String,
     #[serde(default)]
     kind: Option<String>,
+}
+
+const IMPORT_UPLOAD_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+
+async fn cleanup_old_import_uploads(root: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("part" | "ready")
+        ) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if modified
+            .elapsed()
+            .is_ok_and(|age| age > Duration::from_secs(24 * 3600))
+        {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct BeginImportUpload {
+    file_name: String,
+    size: u64,
+}
+
+#[derive(Deserialize)]
+struct ImportUploadQuery {
+    id: String,
+    offset: Option<u64>,
+}
+
+fn import_upload_path(state: &WebHostState, id: &str, suffix: &str) -> Result<PathBuf, String> {
+    let id = uuid::Uuid::parse_str(id).map_err(|_| "Invalid upload id".to_string())?;
+    Ok(state
+        .data_root
+        .join("_tauritavern")
+        .join("web-imports")
+        .join(format!("{id}.{suffix}")))
+}
+
+fn is_safe_archive_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name
+            .chars()
+            .any(|ch| ch.is_control() || ch == '/' || ch == '\\')
+        && is_data_archive_name(name)
+}
+
+async fn begin_import_upload(
+    State(state): State<Arc<WebHostState>>,
+    Json(input): Json<BeginImportUpload>,
+) -> Response<Body> {
+    if !is_safe_archive_file_name(&input.file_name) || input.size == 0 {
+        return bad_request("Select a non-empty zip, tar, tar.gz, or tgz archive".to_string());
+    }
+    if input.size > state.import_max_bytes {
+        return (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(json!({
+            "error": format!("Archive exceeds the configured {} byte upload limit; use the server import folder", state.import_max_bytes)
+        }))).into_response();
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let path = match import_upload_path(&state, &id, "part") {
+        Ok(path) => path,
+        Err(error) => return bad_request(error),
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(error) = tokio::fs::create_dir_all(parent).await {
+            return application_error_message(error.to_string());
+        }
+        let _guard = state.import_upload_lock.lock().await;
+        return match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+        {
+            Ok(_) => (
+                StatusCode::OK,
+                axum::Json(json!({
+                    "id": id,
+                    "max_bytes": state.import_max_bytes,
+                    "chunk_bytes": IMPORT_UPLOAD_CHUNK_BYTES,
+                })),
+            )
+                .into_response(),
+            Err(error) => application_error_message(error.to_string()),
+        };
+    }
+    application_error_message("Upload storage path is invalid".to_string())
+}
+
+async fn append_import_upload(
+    State(state): State<Arc<WebHostState>>,
+    Query(query): Query<ImportUploadQuery>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let Some(offset) = query.offset else {
+        return bad_request("Missing upload offset".to_string());
+    };
+    let path = match import_upload_path(&state, &query.id, "part") {
+        Ok(path) => path,
+        Err(error) => return bad_request(error),
+    };
+    let bytes = match to_bytes(request.into_body(), IMPORT_UPLOAD_CHUNK_BYTES).await {
+        Ok(bytes) if !bytes.is_empty() => bytes,
+        Ok(_) => return bad_request("Upload chunk is empty".to_string()),
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                axum::Json(json!({ "error": "Upload chunk exceeds 8 MiB" })),
+            )
+                .into_response();
+        }
+    };
+    let _guard = state.import_upload_lock.lock().await;
+    let mut file = match tokio::fs::OpenOptions::new().append(true).open(&path).await {
+        Ok(file) => file,
+        Err(_) => return bad_request("Upload session was not found".to_string()),
+    };
+    let current = match file.metadata().await {
+        Ok(metadata) => metadata.len(),
+        Err(error) => return application_error_message(error.to_string()),
+    };
+    if current != offset {
+        return (
+            StatusCode::CONFLICT,
+            axum::Json(json!({ "error": "Upload offset mismatch", "offset": current })),
+        )
+            .into_response();
+    }
+    let Some(next) = current.checked_add(bytes.len() as u64) else {
+        return bad_request("Upload size overflow".to_string());
+    };
+    if next > state.import_max_bytes {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            axum::Json(json!({ "error": "Upload exceeds configured size limit" })),
+        )
+            .into_response();
+    }
+    if let Err(error) = tokio::io::AsyncWriteExt::write_all(&mut file, &bytes).await {
+        return application_error_message(error.to_string());
+    }
+    (StatusCode::OK, axum::Json(json!({ "offset": next }))).into_response()
+}
+
+async fn finish_import_upload(
+    State(state): State<Arc<WebHostState>>,
+    Query(query): Query<ImportUploadQuery>,
+    Json(input): Json<BeginImportUpload>,
+) -> Response<Body> {
+    let part = match import_upload_path(&state, &query.id, "part") {
+        Ok(path) => path,
+        Err(error) => return bad_request(error),
+    };
+    let ready = match import_upload_path(&state, &query.id, "ready") {
+        Ok(path) => path,
+        Err(error) => return bad_request(error),
+    };
+    let _guard = state.import_upload_lock.lock().await;
+    let size = match tokio::fs::metadata(&part).await {
+        Ok(metadata) => metadata.len(),
+        Err(_) => return bad_request("Upload session was not found".to_string()),
+    };
+    if size == 0 || size != input.size || !is_safe_archive_file_name(&input.file_name) {
+        return bad_request(
+            "Uploaded archive is incomplete or has an unsupported name".to_string(),
+        );
+    }
+    match tokio::fs::rename(&part, &ready).await {
+        Ok(()) => (
+            StatusCode::OK,
+            axum::Json(json!({ "archive_path": ready.to_string_lossy() })),
+        )
+            .into_response(),
+        Err(error) => application_error_message(error.to_string()),
+    }
+}
+
+async fn discard_import_upload(
+    State(state): State<Arc<WebHostState>>,
+    Query(query): Query<ImportUploadQuery>,
+) -> Response<Body> {
+    let _guard = state.import_upload_lock.lock().await;
+    for suffix in ["part", "ready"] {
+        let path = match import_upload_path(&state, &query.id, suffix) {
+            Ok(path) => path,
+            Err(error) => return bad_request(error),
+        };
+        if let Err(error) = tokio::fs::remove_file(path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return application_error_message(error.to_string());
+        }
+    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 async fn stage_upload(
@@ -3701,12 +3938,15 @@ async fn invoke(
                 .or_else(|| request.args.get("archiveIsTemporary"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            state
-                .services
-                .data_archives
-                .start_import(Path::new(archive_path), archive_is_temporary)
-                .map(|job_id| json!(job_id))
-                .map_err(|error| error.to_string())
+            match resolve_web_import_upload(&state, archive_path).await {
+                Ok(path) => state
+                    .services
+                    .data_archives
+                    .start_import_deferred(&path, archive_is_temporary)
+                    .map(|job_id| json!(job_id))
+                    .map_err(|error| error.to_string()),
+                Err(error) => Err(error),
+            }
         }
         "list_nas_data_archives" => list_nas_data_archives(&state.import_root).await,
         "start_import_nas_data_archive" => {
@@ -3715,7 +3955,7 @@ async fn invoke(
                 Ok(archive_path) => state
                     .services
                     .data_archives
-                    .start_import(&archive_path, false)
+                    .start_import_deferred(&archive_path, false)
                     .map(|job_id| json!(job_id))
                     .map_err(|error| error.to_string()),
                 Err(error) => Err(error),
@@ -5186,7 +5426,14 @@ async fn resolve_nas_data_archive(import_root: &Path, file_name: &str) -> Result
     let canonical_root = tokio::fs::canonicalize(import_root)
         .await
         .map_err(|error| format!("NAS import folder is unavailable: {error}"))?;
-    let candidate = tokio::fs::canonicalize(canonical_root.join(name))
+    let unverified = canonical_root.join(name);
+    let entry = tokio::fs::symlink_metadata(&unverified)
+        .await
+        .map_err(|error| format!("NAS archive file was not found: {error}"))?;
+    if !entry.file_type().is_file() {
+        return Err("NAS archive must be a regular file, not a link".to_string());
+    }
+    let candidate = tokio::fs::canonicalize(unverified)
         .await
         .map_err(|error| format!("NAS archive file was not found: {error}"))?;
     if !candidate.starts_with(&canonical_root) {
@@ -5236,6 +5483,29 @@ async fn resolve_staged_upload(
         return Err("Upload path is outside the web upload staging directory".to_string());
     }
     Ok(path)
+}
+
+async fn resolve_web_import_upload(
+    state: &WebHostState,
+    supplied_path: &str,
+) -> Result<PathBuf, String> {
+    let candidate = tokio::fs::canonicalize(supplied_path)
+        .await
+        .map_err(|error| format!("Uploaded archive is unavailable: {error}"))?;
+    let completed_root = state.data_root.join("_tauritavern").join("web-imports");
+    let legacy_root = state.data_root.join("_tauritavern").join("web-uploads");
+    let mut allowed = false;
+    if let Ok(root) = tokio::fs::canonicalize(completed_root).await {
+        allowed |=
+            candidate.starts_with(root) && candidate.extension().is_some_and(|ext| ext == "ready");
+    }
+    if let Ok(root) = tokio::fs::canonicalize(legacy_root).await {
+        allowed |= candidate.starts_with(root);
+    }
+    if !allowed || !candidate.is_file() {
+        return Err("Archive must be a completed web upload".to_string());
+    }
+    Ok(candidate)
 }
 
 fn parse_byte_array(args: &Value, snake: &str, camel: &str) -> Result<Vec<u8>, String> {
@@ -5628,19 +5898,101 @@ async fn serve_host_resource(
 
 struct WebDataArchiveFileGateway {
     data_root: PathBuf,
+    import_root: PathBuf,
     archive_root: PathBuf,
 }
 
 impl WebDataArchiveFileGateway {
-    fn new(data_root: PathBuf, archive_root: PathBuf) -> Self {
+    fn new(data_root: PathBuf, import_root: PathBuf, archive_root: PathBuf) -> Self {
         Self {
             data_root,
+            import_root,
             archive_root,
         }
     }
 
     fn archive_root(&self) -> PathBuf {
         self.archive_root.clone()
+    }
+
+    fn stage_import(
+        &self,
+        archive_path: &Path,
+        job_id: &str,
+        report_progress: &mut dyn FnMut(f32),
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<ImportArchiveExecutionRequest, DomainError> {
+        let source = std::fs::canonicalize(archive_path).map_err(|error| {
+            DomainError::InvalidData(format!("Archive is unavailable: {error}"))
+        })?;
+        let upload_root = self.data_root.join("_tauritavern").join("web-uploads");
+        let import_upload_root = self.data_root.join("_tauritavern").join("web-imports");
+        let in_upload_root = [upload_root, import_upload_root]
+            .iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .any(|root| source.starts_with(root));
+        let in_import_root = std::fs::canonicalize(&self.import_root)
+            .ok()
+            .is_some_and(|root| source.starts_with(root));
+        if !source.is_file() || !(in_upload_root || in_import_root) {
+            return Err(DomainError::InvalidData(
+                "Archive must be a completed web upload or a file in the configured import directory".to_string(),
+            ));
+        }
+        let workspace_root = self.archive_root().join("imports").join(job_id);
+        std::fs::create_dir_all(&workspace_root)
+            .map_err(|error| DomainError::InternalError(error.to_string()))?;
+        let result = (|| {
+            let mut input = std::fs::File::open(&source)
+                .map_err(|error| DomainError::InternalError(error.to_string()))?;
+            let total = input
+                .metadata()
+                .map_err(|error| DomainError::InternalError(error.to_string()))?
+                .len();
+            let staged_archive = workspace_root.join("archive.zip");
+            let mut output = std::fs::File::create(&staged_archive)
+                .map_err(|error| DomainError::InternalError(error.to_string()))?;
+            let mut copied = 0u64;
+            let mut buffer = vec![0u8; 1024 * 1024];
+            loop {
+                if is_cancelled() {
+                    return Err(DomainError::InvalidData("Import cancelled".to_string()));
+                }
+                let count = input
+                    .read(&mut buffer)
+                    .map_err(|error| DomainError::InternalError(error.to_string()))?;
+                if count == 0 {
+                    break;
+                }
+                output.write_all(&buffer[..count]).map_err(|error| {
+                    DomainError::InternalError(format!("Unable to stage archive: {error}"))
+                })?;
+                copied += count as u64;
+                report_progress(if total == 0 {
+                    100.0
+                } else {
+                    copied as f32 / total as f32 * 100.0
+                });
+            }
+            if total == 0 {
+                return Err(DomainError::InvalidData("Archive is empty".to_string()));
+            }
+            output
+                .sync_all()
+                .map_err(|error| DomainError::InternalError(error.to_string()))?;
+            Ok(ImportArchiveExecutionRequest {
+                data_root: self.data_root.clone(),
+                archive_path: staged_archive,
+                workspace_root: workspace_root.clone(),
+            })
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&workspace_root);
+        }
+        if in_upload_root && !in_import_root {
+            let _ = std::fs::remove_file(&source);
+        }
+        result
     }
 
     fn export_root(&self) -> PathBuf {
@@ -5689,27 +6041,18 @@ impl DataArchiveFileGateway for WebDataArchiveFileGateway {
         _archive_is_temporary: bool,
         job_id: &str,
     ) -> Result<ImportArchiveExecutionRequest, DomainError> {
-        let source = std::fs::canonicalize(archive_path).map_err(|error| {
-            DomainError::InvalidData(format!("Archive is unavailable: {error}"))
-        })?;
-        let data_root = std::fs::canonicalize(&self.data_root)
-            .map_err(|error| DomainError::InternalError(error.to_string()))?;
-        if !source.starts_with(&data_root) || !source.is_file() {
-            return Err(DomainError::InvalidData(
-                "Archive must be an uploaded file inside the app data directory".to_string(),
-            ));
-        }
-        let workspace_root = self.archive_root().join("imports").join(job_id);
-        std::fs::create_dir_all(&workspace_root)
-            .map_err(|error| DomainError::InternalError(error.to_string()))?;
-        let staged_archive = workspace_root.join("archive.zip");
-        std::fs::copy(&source, &staged_archive)
-            .map_err(|error| DomainError::InternalError(error.to_string()))?;
-        Ok(ImportArchiveExecutionRequest {
-            data_root: self.data_root.clone(),
-            archive_path: staged_archive,
-            workspace_root,
-        })
+        self.stage_import(archive_path, job_id, &mut |_| {}, &|| false)
+    }
+
+    fn prepare_import_archive_with_progress(
+        &self,
+        archive_path: &Path,
+        _archive_is_temporary: bool,
+        job_id: &str,
+        report_progress: &mut dyn FnMut(f32),
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<ImportArchiveExecutionRequest, DomainError> {
+        self.stage_import(archive_path, job_id, report_progress, is_cancelled)
     }
 
     fn prepare_export_archive(

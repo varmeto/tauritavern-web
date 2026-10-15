@@ -343,12 +343,12 @@ impl WebGenerationRegistry {
                 }
                 batch.push(value);
             }
-            if !batch.is_empty() {
-                if let Err(error) = self.append(&job, &batch).await {
-                    let _ = self.service.close_stream(&task_id).await;
-                    self.finish(&job, "error", Some(error)).await;
-                    break;
-                }
+            if !batch.is_empty()
+                && let Err(error) = self.append(&job, &batch).await
+            {
+                let _ = self.service.close_stream(&task_id).await;
+                self.finish(&job, "error", Some(error)).await;
+                break;
             }
             let status = serde_json::to_value(result.status).unwrap_or(Value::Null);
             if status != "running" {

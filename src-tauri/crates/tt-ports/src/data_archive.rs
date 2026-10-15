@@ -69,6 +69,16 @@ pub trait DataArchiveFileGateway: Send + Sync {
         archive_is_temporary: bool,
         job_id: &str,
     ) -> Result<ImportArchiveExecutionRequest, DomainError>;
+    fn prepare_import_archive_with_progress(
+        &self,
+        archive_path: &Path,
+        archive_is_temporary: bool,
+        job_id: &str,
+        _report_progress: &mut dyn FnMut(f32),
+        _is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<ImportArchiveExecutionRequest, DomainError> {
+        self.prepare_import_archive(archive_path, archive_is_temporary, job_id)
+    }
     fn prepare_export_archive(
         &self,
         job_id: &str,

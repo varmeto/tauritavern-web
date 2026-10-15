@@ -66,15 +66,38 @@ impl DataArchiveService {
         archive_path: &Path,
         archive_is_temporary: bool,
     ) -> Result<String, DomainError> {
+        self.start_import_internal(archive_path, archive_is_temporary, false)
+    }
+
+    pub fn start_import_deferred(
+        &self,
+        archive_path: &Path,
+        archive_is_temporary: bool,
+    ) -> Result<String, DomainError> {
+        self.start_import_internal(archive_path, archive_is_temporary, true)
+    }
+
+    fn start_import_internal(
+        &self,
+        archive_path: &Path,
+        archive_is_temporary: bool,
+        deferred: bool,
+    ) -> Result<String, DomainError> {
         let job_id = Uuid::new_v4().simple().to_string();
-        let request =
-            self.files
-                .prepare_import_archive(archive_path, archive_is_temporary, &job_id)?;
-        let workspace_root = request.workspace_root.clone();
-        let data_root = request.data_root.clone();
+        let source = archive_path.to_path_buf();
+        let prepared = if deferred {
+            None
+        } else {
+            Some(
+                self.files
+                    .prepare_import_archive(archive_path, archive_is_temporary, &job_id)?,
+            )
+        };
         let job = Arc::new(DataArchiveJobHandle::new(&job_id, DATA_ARCHIVE_KIND_IMPORT));
         if let Err(error) = self.jobs.insert(&job_id, job.clone()) {
-            self.files.cleanup_directory(&workspace_root);
+            if let Some(request) = prepared {
+                self.files.cleanup_directory(&request.workspace_root);
+            }
             return Err(error);
         }
 
@@ -84,8 +107,59 @@ impl DataArchiveService {
         let data_root_initializer = self.data_root_initializer.clone();
         let reconciler = self.reconciler.clone();
         let runtime = self.runtime.clone();
+        let spawned_id = job_id.clone();
 
         runtime.clone().spawn(async move {
+            let _ = job.mark_running("staging", "Preparing import archive");
+            let staging_files = files.clone();
+            let staging_job = job.clone();
+            let staging_id = spawned_id;
+            let request = if let Some(request) = prepared {
+                request
+            } else {
+                match runtime
+                    .spawn_blocking(move || {
+                        let progress_job = staging_job.clone();
+                        let mut report_progress = move |percent: f32| {
+                            let _ = progress_job.update_progress(
+                                "staging",
+                                percent * 0.1,
+                                "Preparing import archive",
+                            );
+                        };
+                        let cancel_job = staging_job.clone();
+                        staging_files.prepare_import_archive_with_progress(
+                            &source,
+                            archive_is_temporary,
+                            &staging_id,
+                            &mut report_progress,
+                            &move || cancel_job.is_cancel_requested(),
+                        )
+                    })
+                    .await
+                {
+                    Ok(Ok(request)) => request,
+                    Ok(Err(error)) => {
+                        if job.is_cancel_requested() {
+                            let _ = job.mark_cancelled();
+                        } else {
+                            let _ = job.mark_failed(&error.to_string());
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = job.mark_failed(&format!("Import staging task failed: {error}"));
+                        return;
+                    }
+                }
+            };
+            let workspace_root = request.workspace_root.clone();
+            let data_root = request.data_root.clone();
+            if job.is_cancel_requested() {
+                let _ = job.mark_cancelled();
+                files.cleanup_directory(&workspace_root);
+                return;
+            }
             let _ = job.mark_running("starting", "Import job started");
             let guard = match database.prepare_archive(true).await {
                 Ok(guard) => guard,
@@ -103,7 +177,11 @@ impl DataArchiveService {
                     let progress_job = blocking_job.clone();
                     let mut report_progress =
                         move |stage: &str, progress_percent: f32, message: &str| {
-                            let _ = progress_job.update_progress(stage, progress_percent, message);
+                            let _ = progress_job.update_progress(
+                                stage,
+                                10.0 + progress_percent * 0.9,
+                                message,
+                            );
                         };
 
                     let cancel_job = blocking_job.clone();

@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::dto::data_archive_dto::{
     DATA_ARCHIVE_ARTIFACT_AVAILABLE, DATA_ARCHIVE_ARTIFACT_DISPOSED, DATA_ARCHIVE_ARTIFACT_MISSING,
-    DATA_ARCHIVE_KIND_EXPORT, DATA_ARCHIVE_STATE_CANCELLED, DATA_ARCHIVE_STATE_COMPLETED,
-    DATA_ARCHIVE_STATE_FAILED, DATA_ARCHIVE_STATE_PENDING, DATA_ARCHIVE_STATE_RUNNING,
-    DataArchiveJobResult, DataArchiveJobStatus,
+    DATA_ARCHIVE_KIND_EXPORT, DATA_ARCHIVE_KIND_IMPORT, DATA_ARCHIVE_STATE_CANCELLED,
+    DATA_ARCHIVE_STATE_COMPLETED, DATA_ARCHIVE_STATE_FAILED, DATA_ARCHIVE_STATE_PENDING,
+    DATA_ARCHIVE_STATE_RUNNING, DataArchiveJobResult, DataArchiveJobStatus,
 };
 use tt_domain::errors::DomainError;
 use tt_domain::models::data_archive::DataArchiveLocalMutationSummary;
@@ -32,6 +32,21 @@ impl DataArchiveJobRegistry {
             .jobs
             .lock()
             .map_err(|_| DomainError::InternalError("Failed to lock job registry".to_string()))?;
+        if job.snapshot()?.kind == DATA_ARCHIVE_KIND_IMPORT
+            && jobs.values().any(|existing| {
+                existing.snapshot().is_ok_and(|status| {
+                    status.kind == DATA_ARCHIVE_KIND_IMPORT
+                        && matches!(
+                            status.state.as_str(),
+                            DATA_ARCHIVE_STATE_PENDING | DATA_ARCHIVE_STATE_RUNNING
+                        )
+                })
+            })
+        {
+            return Err(DomainError::InvalidData(
+                "Another data import is already running".to_string(),
+            ));
+        }
         jobs.insert(job_id.to_string(), job);
         Ok(())
     }

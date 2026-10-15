@@ -13,7 +13,7 @@
 1. 导入镜像包：`docker load -i tauritavern-web-2.3.0-v1.1-arm64.tar`。
 2. 将 `compose.yaml`、`.env.example` 放进 NAS 上原 Compose 项目目录。复制 `.env.example` 为 `.env`，填入原访问密码 `TT_WEB_PASSWORD`，把 `TT_DATA_VOLUME` 设为第 1 步确认的真实卷名。不要更改正在使用的端口 `40377`。
 3. 先运行 `docker compose config`，确认 app 的卷显示为第 1 步的真实名称，且只有 gateway 发布 `40377:8080`。再运行 `docker compose up -d`。
-4. 用原局域网地址 `http://192.168.31.156:40377` 或原有 HTTPS 域名登录。检查角色、聊天、扩展及设置，再做一轮模型生成、锁屏返回和刷新续接。
+4. 用局域网地址 `http://<NAS_IP>:40377` 或自己的 HTTPS 域名登录。检查角色、聊天、扩展及设置，再做一轮模型生成、锁屏返回和刷新续接。
 
 `TT_DATA_VOLUME` 未设置时 Compose 会拒绝启动，防止误建空数据卷。不要在升级过程中运行 `docker compose down -v`。
 

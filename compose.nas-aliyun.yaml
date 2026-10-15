@@ -2,18 +2,19 @@ version: "3.8"
 
 services:
   app:
-    image: crpi-r6vmfx1s6cdrwjcm.cn-beijing.personal.cr.aliyuncs.com/varmeto/tauritavern-web-app:2.3.0-v1.2-arm64
+    image: crpi-r6vmfx1s6cdrwjcm.cn-beijing.personal.cr.aliyuncs.com/varmeto/tauritavern-web-app:2.3.0-v1.3-arm64
     restart: unless-stopped
     environment:
       PORT: "3093"
       TT_DATA_DIR: /data
       TT_IMPORT_DIR: /imports
+      TT_WEB_IMPORT_MAX_BYTES: "4294967296"
     volumes:
       - ./data:/data
       - ./imports:/imports:ro
 
   gateway:
-    image: crpi-r6vmfx1s6cdrwjcm.cn-beijing.personal.cr.aliyuncs.com/varmeto/tauritavern-web-gateway:2.3.0-v1.2.1-arm64
+    image: crpi-r6vmfx1s6cdrwjcm.cn-beijing.personal.cr.aliyuncs.com/varmeto/tauritavern-web-gateway:2.3.0-v1.3-arm64
     restart: unless-stopped
     depends_on:
       - app

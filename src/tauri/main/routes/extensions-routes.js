@@ -24,6 +24,7 @@ export function registerExtensionRoutes(router, context, { jsonResponse }) {
             return jsonResponse({ error: `Unable to access uploaded archive${reason}` }, 400);
         }
 
+        let accepted = false;
         try {
             const jobId = parseJobId(await context.safeInvoke('start_import_data_archive', {
                 archive_path: fileInfo.filePath,
@@ -32,13 +33,16 @@ export function registerExtensionRoutes(router, context, { jsonResponse }) {
             if (!jobId) {
                 return jsonResponse({ error: 'Import job id is missing' }, 500);
             }
+            accepted = true;
 
             return jsonResponse({
                 ok: true,
                 job_id: jobId,
             });
         } finally {
-            await fileInfo.cleanup?.();
+            if (!isWebRuntime() || !accepted) {
+                await fileInfo.cleanup?.();
+            }
         }
     }
 

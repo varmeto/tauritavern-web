@@ -8,8 +8,11 @@ services:
     environment:
       PORT: "3093"
       TT_DATA_DIR: /data
+      TT_IMPORT_DIR: /imports
+      TT_WEB_IMPORT_MAX_BYTES: ${TT_WEB_IMPORT_MAX_BYTES:-4294967296}
     volumes:
       - tauritavern-data:/data
+      - ./imports:/imports:ro
     networks:
       - tauritavern
     restart: unless-stopped

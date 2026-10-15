@@ -46,7 +46,7 @@ try {
 } catch {
     webAdapterCommit = process.env.TT_WEB_ADAPTER_COMMIT || 'unknown';
 }
-const webAdapterVersion = 'v1';
+const webAdapterVersion = upstreamMetadata.webAdapterVersion;
 const buildId = createHash('sha256')
     .update(JSON.stringify({ version: packageJson.version, upstreamCommit, webAdapterVersion, webAdapterCommit, assets }))
     .digest('hex').slice(0, 20);

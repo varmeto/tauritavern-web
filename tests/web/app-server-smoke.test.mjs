@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,13 +30,14 @@ async function getAvailablePort() {
     return port;
 }
 
-function startApp(dataRoot, port) {
+function startApp(dataRoot, port, importRoot) {
     const child = spawn(appBinary, [], {
         cwd: repositoryRoot,
         env: {
             ...process.env,
             PORT: String(port),
             TT_DATA_DIR: dataRoot,
+            TT_IMPORT_DIR: importRoot,
             TT_CONTENT_DIR: path.join(repositoryRoot, 'default', 'content'),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -95,15 +96,17 @@ test('web app bootstraps, persists data across restart, and imports staged world
     }
 
     const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'tt-web-host-smoke-'));
+    const importRoot = await mkdtemp(path.join(os.tmpdir(), 'tt-web-import-smoke-'));
     const port = await getAvailablePort();
     const baseUrl = `http://127.0.0.1:${port}`;
     let app;
     t.after(async () => {
         if (app) await stopApp(app).catch(() => {});
         await rm(dataRoot, { recursive: true, force: true });
+        await rm(importRoot, { recursive: true, force: true });
     });
 
-    app = startApp(dataRoot, port);
+    app = startApp(dataRoot, port, importRoot);
     await waitForHealth(app, baseUrl);
     const health = await fetch(`${baseUrl}/healthz`).then((response) => response.json());
     assert.equal(health.status, 'ok');
@@ -501,6 +504,107 @@ test('web app bootstraps, persists data across restart, and imports staged world
     assert.equal(archiveResponse.status, 200);
     const archiveBytes = Buffer.from(await archiveResponse.arrayBuffer());
     assert.deepEqual(archiveBytes.subarray(0, 2), Buffer.from('PK'));
+    await writeFile(path.join(importRoot, 'nas-archive.zip'), archiveBytes);
+    const nasArchives = await invoke(baseUrl, 'list_nas_data_archives');
+    assert.ok(nasArchives.some((archive) => archive.fileName === 'nas-archive.zip'));
+    await writeFile(path.join(importRoot, 'not-an-archive.txt'), 'ignored');
+    assert.ok(!(await invoke(baseUrl, 'list_nas_data_archives')).some((archive) => archive.fileName === 'not-an-archive.txt'));
+    const invalidNasResponse = await fetch(`${baseUrl}/__tt/invoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'start_import_nas_data_archive', args: { file_name: '../nas-archive.zip' } }),
+    });
+    assert.match(JSON.stringify(await invalidNasResponse.json()), /Invalid NAS archive file name/);
+    const nasJobId = await invoke(baseUrl, 'start_import_nas_data_archive', { file_name: 'nas-archive.zip' });
+    let nasStatus;
+    const nasDeadline = Date.now() + 30_000;
+    do {
+        nasStatus = await invoke(baseUrl, 'get_data_archive_job_status', { job_id: nasJobId });
+        if (['completed', 'failed', 'cancelled'].includes(nasStatus.state)) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    } while (Date.now() < nasDeadline);
+    assert.equal(nasStatus.state, 'completed', JSON.stringify(nasStatus));
+    assert.equal((await stat(path.join(importRoot, 'nas-archive.zip'))).size, archiveBytes.length);
+    const invalidUploadName = await fetch(`${baseUrl}/__tt/import-uploads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_name: '../invalid.zip', size: archiveBytes.length }),
+    });
+    assert.equal(invalidUploadName.status, 400);
+    const beginResponse = await fetch(`${baseUrl}/__tt/import-uploads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_name: 'browser-archive.zip', size: archiveBytes.length }),
+    });
+    assert.equal(beginResponse.status, 200);
+    const browserUpload = await beginResponse.json();
+    const incompletePath = path.join(dataRoot, '_tauritavern', 'web-imports', `${browserUpload.id}.part`);
+    const incompleteImport = await fetch(`${baseUrl}/__tt/invoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: 'start_import_data_archive', args: { archive_path: incompletePath } }),
+    });
+    assert.match(JSON.stringify(await incompleteImport.json()), /completed web upload/);
+    const overLimitResponse = await fetch(`${baseUrl}/__tt/import-uploads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_name: 'too-large.zip', size: 4 * 1024 ** 3 + 1 }),
+    });
+    assert.equal(overLimitResponse.status, 413);
+    const chunkLimit = await fetch(`${baseUrl}/__tt/import-uploads`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_name: 'chunk-limit.zip', size: 8 * 1024 * 1024 }),
+    });
+    assert.equal(chunkLimit.status, 200);
+    const { id: chunkLimitId } = await chunkLimit.json();
+    const maximumChunk = await fetch(`${baseUrl}/__tt/import-uploads?id=${chunkLimitId}&offset=0`, {
+        method: 'PUT',
+        body: Buffer.alloc(8 * 1024 * 1024),
+    });
+    assert.equal(maximumChunk.status, 200);
+    assert.equal((await maximumChunk.json()).offset, 8 * 1024 * 1024);
+    const discardChunk = await fetch(`${baseUrl}/__tt/import-uploads?id=${chunkLimitId}`, { method: 'DELETE' });
+    assert.equal(discardChunk.status, 204);
+    const prematureFinish = await fetch(`${baseUrl}/__tt/import-uploads/finish?id=${browserUpload.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_name: 'browser-archive.zip', size: archiveBytes.length }),
+    });
+    assert.equal(prematureFinish.status, 400);
+    const wrongOffsetResponse = await fetch(`${baseUrl}/__tt/import-uploads?id=${browserUpload.id}&offset=1`, {
+        method: 'PUT',
+        body: archiveBytes.subarray(0, 1),
+    });
+    assert.equal(wrongOffsetResponse.status, 409);
+    const middle = Math.floor(archiveBytes.length / 2);
+    for (const [offset, chunk] of [[0, archiveBytes.subarray(0, middle)], [middle, archiveBytes.subarray(middle)]]) {
+        const chunkResponse = await fetch(`${baseUrl}/__tt/import-uploads?id=${browserUpload.id}&offset=${offset}`, {
+            method: 'PUT',
+            body: chunk,
+        });
+        assert.equal(chunkResponse.status, 200);
+    }
+    const finishResponse = await fetch(`${baseUrl}/__tt/import-uploads/finish?id=${browserUpload.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_name: 'browser-archive.zip', size: archiveBytes.length }),
+    });
+    assert.equal(finishResponse.status, 200);
+    const { archive_path: browserArchivePath } = await finishResponse.json();
+    const browserJobId = await invoke(baseUrl, 'start_import_data_archive', {
+        archive_path: browserArchivePath,
+        archive_is_temporary: true,
+    });
+    let browserStatus;
+    const browserDeadline = Date.now() + 30_000;
+    do {
+        browserStatus = await invoke(baseUrl, 'get_data_archive_job_status', { job_id: browserJobId });
+        if (['completed', 'failed', 'cancelled'].includes(browserStatus.state)) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    } while (Date.now() < browserDeadline);
+    assert.equal(browserStatus.state, 'completed', JSON.stringify(browserStatus));
+    await assert.rejects(stat(browserArchivePath), { code: 'ENOENT' });
     const stagedArchiveResponse = await fetch(`${baseUrl}/__tt/uploads?extension=zip&kind=data-archive`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
@@ -546,7 +650,7 @@ test('web app bootstraps, persists data across restart, and imports staged world
     assert.equal(partial.status, 'running');
 
     await stopApp(app);
-    app = startApp(dataRoot, port);
+    app = startApp(dataRoot, port, importRoot);
     await waitForHealth(app, baseUrl);
     const recoveredWebTask = await invoke(baseUrl, 'read_web_generation', { taskId: webTaskId, afterSeq: 0 });
     assert.equal(recoveredWebTask.status, 'done');

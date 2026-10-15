@@ -18,6 +18,17 @@
                     <i class="fa-solid fa-file-import"></i>
                     <span>Import Data Archive</span>
                 </button>
+                <button id="data_migration_import_local_button" class="menu_button menu_button_icon" style="display:none;"
+                    data-i18n="Upload archive from this device">
+                    <i class="fa-solid fa-upload"></i>
+                    <span>Upload archive from this device</span>
+                </button>
+                <button id="data_migration_import_server_button" class="menu_button menu_button_icon" style="display:none;"
+                    data-i18n="Import archive from server folder">
+                    <i class="fa-solid fa-server"></i>
+                    <span>Import archive from server folder</span>
+                </button>
+                <input id="data_migration_import_file" type="file" accept=".zip,.tar,.tar.gz,.tgz,.gz" hidden>
                 <button id="data_migration_export_button" class="menu_button menu_button_icon"
                     data-i18n="Export Current Data">
                     <i class="fa-solid fa-file-export"></i>
@@ -29,8 +40,9 @@
                     <span>Cancel Migration</span>
                 </button>
             </div>
-            <small class="extensions_info" data-i18n="For Docker Web, put the archive in the NAS project's imports folder before importing.">
-                For Docker Web, put the archive in the NAS project's imports folder before importing.
+            <small id="data_migration_web_import_tip" class="extensions_info" style="display:none;"
+                data-i18n="Choose a file on this device or place it in the configured server imports folder.">
+                Choose a file on this device or place it in the configured server imports folder.
             </small>
             <small id="data_migration_status" class="extensions_info"></small>
             <progress id="data_migration_progress" max="100" hidden aria-label="Data migration progress"
