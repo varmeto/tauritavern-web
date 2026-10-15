@@ -26,9 +26,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Unable to read source revision.' }
     New-Item -ItemType Directory -Path $packageDirectory | Out-Null
 
-    docker buildx build --platform linux/arm64 --file web/gateway/Dockerfile --build-arg "TT_WEB_ADAPTER_COMMIT=$sourceRevision" --tag "tauritavern-web-gateway:$ReleaseTag" --load .
+    docker buildx build --platform linux/arm64 --provenance=false --sbom=false --file web/gateway/Dockerfile --build-arg "TT_WEB_ADAPTER_COMMIT=$sourceRevision" --tag "tauritavern-web-gateway:$ReleaseTag" --load .
     if ($LASTEXITCODE -ne 0) { throw 'ARM64 gateway build failed.' }
-    docker buildx build --platform linux/arm64 --file web/app-server/Dockerfile --tag "tauritavern-web-app:$ReleaseTag" --load .
+    docker buildx build --platform linux/arm64 --provenance=false --sbom=false --file web/app-server/Dockerfile --tag "tauritavern-web-app:$ReleaseTag" --load .
     if ($LASTEXITCODE -ne 0) { throw 'ARM64 application build failed.' }
     docker save --output $imageArchive "tauritavern-web-gateway:$ReleaseTag" "tauritavern-web-app:$ReleaseTag"
     if ($LASTEXITCODE -ne 0) { throw 'Docker image export failed.' }
